@@ -79,7 +79,7 @@ enum DoubleLogistic {
         return DLParams(mn: mn, mx: mx, sos: sos, rsp: 0.05, eos: eos, rau: 0.05)
     }
 
-    /// Compute RMSE for a parameter set against data.
+    /// Compute RMSE for a parameter set against data (for quality reporting).
     static func rmse(params: DLParams, data: [DataPoint]) -> Double {
         guard !data.isEmpty else { return .infinity }
         var sumSq = 0.0
@@ -91,7 +91,30 @@ enum DoubleLogistic {
         return sqrt(sumSq / Double(data.count))
     }
 
-    /// Fit using Nelder-Mead simplex optimization.
+    /// Huber loss: quadratic for |r| <= delta, linear beyond.
+    /// Limits the influence of outliers on the fit.
+    /// delta = 0.10 is appropriate for NDVI (residuals > 0.10 are treated as outliers).
+    private static let huberDelta: Double = 0.10
+
+    /// Compute mean Huber loss for a parameter set against data (for optimization).
+    static func huberLoss(params: DLParams, data: [DataPoint]) -> Double {
+        guard !data.isEmpty else { return .infinity }
+        let delta = huberDelta
+        var sum = 0.0
+        for pt in data {
+            let r = abs(params.evaluate(t: pt.doy) - pt.ndvi)
+            if r <= delta {
+                sum += 0.5 * r * r
+            } else {
+                sum += delta * (r - 0.5 * delta)
+            }
+        }
+        return sum / Double(data.count)
+    }
+
+    /// Fit using Nelder-Mead simplex optimization with Huber loss.
+    /// The optimizer minimizes Huber loss (robust to outliers). RMSE is computed
+    /// after convergence for quality reporting.
     static func fit(
         data: [DataPoint],
         initial: DLParams,
@@ -116,7 +139,7 @@ enum DoubleLogistic {
 
         func cost(_ x: [Double]) -> Double {
             let p = DLParams.from(clamp(x))
-            var c = rmse(params: p, data: data)
+            var c = huberLoss(params: p, data: data)
             // Penalise season lengths outside allowed range
             let seasonLen = p.eos - p.sos
             if seasonLen < minSeasonLength {
@@ -197,7 +220,7 @@ enum DoubleLogistic {
         }
 
         var best = DLParams.from(clamp(simplex[0]))
-        best.rmse = fvals[0]
+        best.rmse = rmse(params: best, data: data)  // true RMSE for quality reporting
         return best
     }
 
