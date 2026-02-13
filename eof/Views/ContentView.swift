@@ -1395,10 +1395,6 @@ struct ContentView: View {
         let c = geometry.centroid
         log.info("Centroid: \(String(format: "%.4f", c.lon))E, \(String(format: "%.4f", c.lat))N")
 
-        if settings.aoiBufferMeters > 0 {
-            log.info("AOI buffer: \(Int(settings.aoiBufferMeters))m (chip expanded, polygon unchanged)")
-        }
-
         lastStartDate = settings.startDateString
         lastEndDate = settings.endDateString
         lastNDVIThreshold = settings.ndviThreshold

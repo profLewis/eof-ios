@@ -267,7 +267,7 @@ class NDVIProcessor {
             // 2. Determine UTM zone from geometry centroid
             let centroid = geometry.centroid
             let utm = UTMProjection.zoneFor(lon: centroid.lon, lat: centroid.lat)
-            let bbox = Self.bufferedBBox(geometry.bbox, bufferMeters: settings.aoiBufferMeters, atLat: centroid.lat)
+            let bbox = geometry.bbox
             log.info("UTM zone: \(utm.zone)\(utm.isNorth ? "N" : "S") (EPSG:\(utm.epsg))")
 
             // 3. Process items concurrently with per-source tracking
@@ -577,7 +577,7 @@ class NDVIProcessor {
         let bandMapping = sourceConfig.bandMapping
         let sasManager: SASTokenManager? = sourceConfig.assetAuthType == .sasToken ? SASTokenManager() : nil
         let utm = UTMProjection.zoneFor(lon: centroid.lon, lat: centroid.lat)
-        let bbox = Self.bufferedBBox(geometry.bbox, bufferMeters: settings.aoiBufferMeters, atLat: centroid.lat)
+        let bbox = geometry.bbox
         let cogReader = COGReader()
         let maxConc = settings.maxConcurrent
         let cloudThreshold = settings.cloudThreshold
@@ -1066,21 +1066,6 @@ class NDVIProcessor {
             return URL(string: https) ?? url
         }
         return url
-    }
-
-    /// Expand a bbox by a buffer distance in meters. Polygon is unchanged.
-    static func bufferedBBox(
-        _ bbox: (minLon: Double, minLat: Double, maxLon: Double, maxLat: Double),
-        bufferMeters: Double,
-        atLat lat: Double
-    ) -> (minLon: Double, minLat: Double, maxLon: Double, maxLat: Double) {
-        guard bufferMeters > 0 else { return bbox }
-        let metersPerDegLat = 111_320.0
-        let metersPerDegLon = 111_320.0 * cos(lat * .pi / 180)
-        let dLat = bufferMeters / metersPerDegLat
-        let dLon = bufferMeters / metersPerDegLon
-        return (minLon: bbox.minLon - dLon, minLat: bbox.minLat - dLat,
-                maxLon: bbox.maxLon + dLon, maxLat: bbox.maxLat + dLat)
     }
 
     /// Ray-casting point-in-polygon test.

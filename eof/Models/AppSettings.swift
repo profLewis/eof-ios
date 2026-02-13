@@ -41,7 +41,6 @@ class AppSettings {
     var enforceAOI: Bool = true { didSet { save() } }
     var showMaskedClassColors: Bool = false { didSet { save() } }
     var showBasemap: Bool = true { didSet { save() } }
-    var aoiBufferMeters: Double = 50 { didSet { save() } }
 
     // Per-pixel phenology settings
     var pixelEnsembleRuns: Int = 5 { didSet { save() } }
@@ -177,7 +176,6 @@ class AppSettings {
         defaults.set(clusterFilterThreshold, forKey: prefix + "clusterFilterThreshold")
         defaults.set(minSeasonLength, forKey: prefix + "minSeasonLength")
         defaults.set(maxSeasonLength, forKey: prefix + "maxSeasonLength")
-        defaults.set(aoiBufferMeters, forKey: prefix + "aoiBufferMeters")
     }
 
     private func load() {
@@ -228,8 +226,6 @@ class AppSettings {
         if msl > 0 { minSeasonLength = msl }
         let mxl = defaults.integer(forKey: prefix + "maxSeasonLength")
         if mxl > 0 { maxSeasonLength = mxl }
-        let abm = defaults.double(forKey: prefix + "aoiBufferMeters")
-        if abm > 0 { aoiBufferMeters = abm }
     }
 
     var startDateString: String {
