@@ -126,7 +126,7 @@ enum DoubleLogistic {
         let x0 = initial.asArray
 
         // Parameter bounds (for clamping)
-        let lo = [-0.5, 0.0, 1.0, 0.08, 100.0, 0.08]
+        let lo = [-0.5, 0.0, 1.0, 0.02, 100.0, 0.02]
         let hi = [0.8, 1.0, 250.0, 0.6, 366.0, 0.6]
 
         func clamp(_ x: [Double]) -> [Double] {
@@ -315,9 +315,9 @@ enum DoubleLogistic {
                 perturbed.mn = max(-0.5, min(0.8, perturbed.mn))
                 perturbed.mx = max(0.0, min(1.0, perturbed.mx))
                 perturbed.sos = max(1, min(250, perturbed.sos))
-                perturbed.rsp = max(0.08, min(0.6, perturbed.rsp))
+                perturbed.rsp = max(0.02, min(0.6, perturbed.rsp))
                 perturbed.eos = max(100, min(366, perturbed.eos))
-                perturbed.rau = max(0.08, min(0.6, perturbed.rau))
+                perturbed.rau = max(0.02, min(0.6, perturbed.rau))
                 // Enforce mx > mn
                 if perturbed.mx <= perturbed.mn {
                     perturbed.mx = perturbed.mn + 0.1

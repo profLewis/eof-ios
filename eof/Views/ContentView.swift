@@ -972,26 +972,46 @@ struct ContentView: View {
 
             // Parameter map selector
             if pixelPhenology != nil {
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 4) {
-                        Button("Live") {
+                HStack(spacing: 8) {
+                    Menu {
+                        Button {
                             phenologyDisplayParam = nil
                             startPlayback()
+                        } label: {
+                            if phenologyDisplayParam == nil {
+                                Label("Live", systemImage: "checkmark")
+                            } else {
+                                Text("Live")
+                            }
                         }
-                        .font(.system(size: 9))
-                        .buttonStyle(.bordered)
-                        .tint(phenologyDisplayParam == nil ? .green : .gray)
-
+                        Divider()
                         ForEach(PhenologyParameter.allCases, id: \.self) { param in
-                            Button(param.rawValue) {
+                            Button {
                                 phenologyDisplayParam = param
                                 stopPlayback()
+                            } label: {
+                                if phenologyDisplayParam == param {
+                                    Label(param.rawValue, systemImage: "checkmark")
+                                } else {
+                                    Text(param.rawValue)
+                                }
                             }
-                            .font(.system(size: 9))
-                            .buttonStyle(.bordered)
-                            .tint(phenologyDisplayParam == param ? .orange : .gray)
                         }
+                    } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: "map.fill")
+                                .font(.system(size: 9))
+                            Text(phenologyDisplayParam?.rawValue ?? "Live")
+                                .font(.system(size: 9).bold())
+                            Image(systemName: "chevron.up.chevron.down")
+                                .font(.system(size: 7))
+                        }
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(.ultraThinMaterial, in: Capsule())
                     }
+                    .tint(phenologyDisplayParam != nil ? .orange : .green)
+                    Spacer()
                 }
             }
 
