@@ -104,6 +104,12 @@ struct ContentView: View {
                     }
                 }
             }
+            .onChange(of: settings.vegetationIndex) {
+                // Recompute VI values from raw bands when switching NDVI↔DVI
+                if !processor.frames.isEmpty {
+                    processor.recomputeVI()
+                }
+            }
             .onChange(of: settings.aoiSourceLabel) {
                 // Reset to idle when AOI changes so user re-fetches
                 if processor.status == .done || processor.status == .error {
@@ -535,10 +541,12 @@ struct ContentView: View {
 
     // MARK: - NDVI Time Series Chart
 
+    private var viLabel: String { settings.vegetationIndex.rawValue }
+
     private var ndviChart: some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack {
-                Text("Median NDVI")
+                Text("Median \(viLabel)")
                     .font(.caption.bold())
                     .foregroundStyle(.green)
                 if let pp = pixelPhenology, pp.outlierCount > 0 {
@@ -558,8 +566,8 @@ struct ContentView: View {
                 ForEach(sorted) { frame in
                     LineMark(
                         x: .value("Date", frame.date),
-                        y: .value("NDVI", Double(frame.medianNDVI)),
-                        series: .value("Series", "NDVI")
+                        y: .value(viLabel, Double(frame.medianNDVI)),
+                        series: .value("Series", viLabel)
                     )
                     .foregroundStyle(.green.opacity(0.6))
                     .lineStyle(StrokeStyle(lineWidth: 2))
@@ -572,7 +580,7 @@ struct ContentView: View {
                         if idx < filteredMedians.count, !filteredMedians[idx].isNaN {
                             PointMark(
                                 x: .value("Date", frame.date),
-                                y: .value("NDVI", Double(filteredMedians[idx]))
+                                y: .value(viLabel, Double(filteredMedians[idx]))
                             )
                             .foregroundStyle(.yellow)
                             .symbol(.circle)
@@ -588,7 +596,7 @@ struct ContentView: View {
                         : 0
                     LineMark(
                         x: .value("Date", frame.date),
-                        y: .value("NDVI", pct),
+                        y: .value(viLabel, pct),
                         series: .value("Series", "Valid%")
                     )
                     .foregroundStyle(.blue.opacity(0.4))
@@ -599,7 +607,7 @@ struct ContentView: View {
                 ForEach(sorted) { frame in
                     PointMark(
                         x: .value("Date", frame.date),
-                        y: .value("NDVI", Double(frame.medianNDVI))
+                        y: .value(viLabel, Double(frame.medianNDVI))
                     )
                     .foregroundStyle(.green)
                     .symbolSize(15)
@@ -610,7 +618,7 @@ struct ContentView: View {
                     let current = processor.frames[currentFrameIndex]
                     PointMark(
                         x: .value("Date", current.date),
-                        y: .value("NDVI", Double(current.medianNDVI))
+                        y: .value(viLabel, Double(current.medianNDVI))
                     )
                     .foregroundStyle(.red)
                     .symbolSize(200)
@@ -637,7 +645,7 @@ struct ContentView: View {
                 ForEach(dlCurvePoints(sorted: sorted), id: \.id) { pt in
                     LineMark(
                         x: .value("Date", pt.date),
-                        y: .value("NDVI", pt.ndvi),
+                        y: .value(viLabel, pt.ndvi),
                         series: .value("Series", pt.series)
                     )
                     .foregroundStyle(pt.color)
@@ -648,7 +656,7 @@ struct ContentView: View {
                 ForEach(phenologyIndicatorLines(sorted: sorted), id: \.id) { pt in
                     LineMark(
                         x: .value("Date", pt.date),
-                        y: .value("NDVI", pt.ndvi),
+                        y: .value(viLabel, pt.ndvi),
                         series: .value("Series", pt.series)
                     )
                     .foregroundStyle(pt.color)

@@ -844,6 +844,10 @@ class NDVIProcessor {
             var validCount = 0
             var validValues = [Float]()
             var polyPixelCount = 0
+            // DN diagnostics
+            var redDNMin: UInt16 = .max, redDNMax: UInt16 = 0
+            var nirDNMin: UInt16 = .max, nirDNMax: UInt16 = 0
+            var zeroDNCount = 0
             for row in 0..<height {
                 for col in 0..<width {
                     // Check polygon containment
@@ -856,8 +860,14 @@ class NDVIProcessor {
                     // SCL mask is the ONLY mask applied
                     if settings.cloudMask, let mask = sclMask, mask[row][col] { continue }
 
-                    let redDN = Float(red[row][col])
-                    let nirDN = Float(nir[row][col])
+                    let rawRed = red[row][col]
+                    let rawNir = nir[row][col]
+                    if rawRed == 0 && rawNir == 0 { zeroDNCount += 1 }
+                    redDNMin = min(redDNMin, rawRed); redDNMax = max(redDNMax, rawRed)
+                    nirDNMin = min(nirDNMin, rawNir); nirDNMax = max(nirDNMax, rawNir)
+
+                    let redDN = Float(rawRed)
+                    let nirDN = Float(rawNir)
 
                     // DN to reflectance
                     let redRefl = (redDN + baselineOffset) / quantificationValue
@@ -877,6 +887,12 @@ class NDVIProcessor {
                     validValues.append(val)
                     validCount += 1
                 }
+            }
+
+            // Log DN range for diagnostics
+            if polyPixelCount > 0 {
+                let unmasked = polyPixelCount - (settings.cloudMask && sclMask != nil ? sclMask!.flatMap{$0}.filter{$0}.count : 0)
+                log.info("\(dateStr) [\(srcName)] ID=\(item.id): DN red=\(redDNMin)-\(redDNMax) nir=\(nirDNMin)-\(nirDNMax) zero=\(zeroDNCount)/\(unmasked)")
             }
 
             let medianNDVI: Float
@@ -1029,6 +1045,77 @@ class NDVIProcessor {
         if updated > 0 {
             log.info("Recomputed stats for \(updated) frames (SCL valid=\(settings.sclValidClasses.sorted()), cloudMask=\(useCloudMask))")
         }
+    }
+
+    /// Recompute VI values for all frames (e.g., when switching NDVI↔DVI).
+    @MainActor
+    func recomputeVI() {
+        let viMode = settings.vegetationIndex
+        let useCloudMask = settings.cloudMask
+        let useAOI = settings.enforceAOI
+        let sclValid = Set(settings.sclValidClasses.map { UInt16($0) })
+
+        for i in 0..<frames.count {
+            let frame = frames[i]
+            let w = frame.width, h = frame.height
+            let poly = frame.polygonNorm.map { (col: $0.x * Double(w), row: $0.y * Double(h)) }
+
+            var ndvi = [[Float]](repeating: [Float](repeating: .nan, count: w), count: h)
+            var validCount = 0
+            var validValues = [Float]()
+            var polyCount = 0
+
+            for row in 0..<h {
+                for col in 0..<w {
+                    if useAOI {
+                        guard Self.pointInPolygon(x: Double(col) + 0.5, y: Double(row) + 0.5, polygon: poly) else { continue }
+                    }
+                    polyCount += 1
+
+                    if useCloudMask, let scl = frame.sclBand, row < scl.count, col < scl[row].count {
+                        if !sclValid.contains(scl[row][col]) { continue }
+                    }
+
+                    let redDN = Float(frame.redBand[row][col])
+                    let nirDN = Float(frame.nirBand[row][col])
+                    let redRefl = (redDN + baselineOffset) / quantificationValue
+                    let nirRefl = (nirDN + baselineOffset) / quantificationValue
+
+                    let val: Float
+                    switch viMode {
+                    case .ndvi:
+                        let sum = nirRefl + redRefl
+                        guard sum != 0 else { continue }
+                        val = min(1, max(-1, (nirRefl - redRefl) / sum))
+                    case .dvi:
+                        val = nirRefl - redRefl
+                    }
+                    ndvi[row][col] = val
+                    validValues.append(val)
+                    validCount += 1
+                }
+            }
+
+            let median: Float
+            if validValues.isEmpty { median = 0 }
+            else {
+                let sorted = validValues.sorted()
+                let mid = sorted.count / 2
+                median = sorted.count % 2 == 0 ? (sorted[mid-1] + sorted[mid]) / 2 : sorted[mid]
+            }
+
+            frames[i] = NDVIFrame(
+                date: frame.date, dateString: frame.dateString, ndvi: ndvi,
+                width: w, height: h, cloudFraction: frame.cloudFraction,
+                medianNDVI: median, validPixelCount: validCount, polyPixelCount: polyCount,
+                redBand: frame.redBand, nirBand: frame.nirBand,
+                greenBand: frame.greenBand, blueBand: frame.blueBand, sclBand: frame.sclBand,
+                polygonNorm: frame.polygonNorm,
+                greenURL: frame.greenURL, blueURL: frame.blueURL,
+                pixelBounds: frame.pixelBounds, sourceID: frame.sourceID
+            )
+        }
+        log.info("Recomputed \(viMode.rawValue) for \(frames.count) frames")
     }
 
     /// Translate CDSE S3 hrefs to HTTPS URLs.
