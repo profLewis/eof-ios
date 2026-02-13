@@ -51,13 +51,15 @@ actor SASTokenManager {
     }
 
     /// Sign an asset URL by appending SAS query parameters.
+    /// The token is already percent-encoded from the API, so we use
+    /// percentEncodedQuery to avoid double-encoding (which causes 403).
     func signURL(_ url: URL) async throws -> URL {
         let token = try await getToken()
         guard var components = URLComponents(url: url, resolvingAgainstBaseURL: false) else {
             return url
         }
-        let existing = components.query ?? ""
-        components.query = existing.isEmpty ? token : "\(existing)&\(token)"
+        let existing = components.percentEncodedQuery ?? ""
+        components.percentEncodedQuery = existing.isEmpty ? token : "\(existing)&\(token)"
         return components.url ?? url
     }
 
