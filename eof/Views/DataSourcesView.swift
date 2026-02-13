@@ -243,20 +243,24 @@ struct DataSourcesView: View {
         Task {
             do {
                 let sas = SASTokenManager()
-                let token = try await sas.getToken()
-                // Parse expiry from token query: se=2026-02-13T23%3A12%3A41Z
-                var expiry = ""
-                for param in token.components(separatedBy: "&") {
-                    if param.hasPrefix("se=") {
-                        expiry = param.dropFirst(3)
-                            .removingPercentEncoding ?? String(param.dropFirst(3))
+                // Fetch tokens for all enabled SAS-token sources
+                let pcSources = settings.sources.filter { $0.assetAuthType == .sasToken && $0.isEnabled }
+                let collections = pcSources.isEmpty ? ["sentinel-2-l2a"] : pcSources.map(\.collection)
+                var results = [String]()
+                for collection in collections {
+                    let token = try await sas.getToken(for: collection)
+                    var expiry = ""
+                    for param in token.components(separatedBy: "&") {
+                        if param.hasPrefix("se=") {
+                            expiry = param.dropFirst(3)
+                                .removingPercentEncoding ?? String(param.dropFirst(3))
+                        }
                     }
+                    results.append(expiry.isEmpty ? "\(collection): OK" : "\(collection): expires \(expiry)")
                 }
                 await MainActor.run {
                     pcTokenOK = true
-                    pcTokenStatus = expiry.isEmpty
-                        ? "Token OK (\(token.count) chars)"
-                        : "Token OK, expires \(expiry)"
+                    pcTokenStatus = results.joined(separator: "\n")
                     isFetchingPCToken = false
                 }
             } catch {

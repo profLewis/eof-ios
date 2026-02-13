@@ -75,7 +75,7 @@ class NDVIProcessor {
                             if src.assetAuthType == .sasToken {
                                 let t1 = CFAbsoluteTimeGetCurrent()
                                 let sas = SASTokenManager()
-                                _ = try await sas.getToken()
+                                _ = try await sas.getToken(for: src.collection)
                                 sasMs = Int((CFAbsoluteTimeGetCurrent() - t1) * 1000)
                             } else if src.assetAuthType == .bearerToken {
                                 let t1 = CFAbsoluteTimeGetCurrent()
@@ -386,7 +386,8 @@ class NDVIProcessor {
                                 bandMapping: cfg.bandMapping,
                                 sasTokenManager: sasManagers[cfg.sourceID],
                                 bearerTokenManager: bearerManagers[cfg.sourceID],
-                                sourceID: cfg.sourceID
+                                sourceID: cfg.sourceID,
+                                collection: cfg.collection
                             )
                             return .success(frame, slot)
                         } catch let err as COGError {
@@ -433,7 +434,8 @@ class NDVIProcessor {
                                 bandMapping: cfg.bandMapping,
                                 sasTokenManager: sasManagers[cfg.sourceID],
                                 bearerTokenManager: bearerManagers[cfg.sourceID],
-                                sourceID: cfg.sourceID
+                                sourceID: cfg.sourceID,
+                                collection: cfg.collection
                             )
                             return .success(frame, slot)
                         } catch {
@@ -629,7 +631,8 @@ class NDVIProcessor {
                         cloudThreshold: cloudThreshold,
                         bandMapping: bandMapping,
                         sasTokenManager: sasManager,
-                        sourceID: sourceConfig.sourceID
+                        sourceID: sourceConfig.sourceID,
+                        collection: sourceConfig.collection
                     )
                 }
                 running += 1
@@ -695,7 +698,8 @@ class NDVIProcessor {
         bandMapping: BandMapping = BandMapping(red: "red", nir: "nir", green: "green", blue: "blue", scl: "scl", projTransformKey: "red"),
         sasTokenManager: SASTokenManager? = nil,
         bearerTokenManager: BearerTokenManager? = nil,
-        sourceID: SourceID? = nil
+        sourceID: SourceID? = nil,
+        collection: String = "sentinel-2-l2a"
     ) async throws -> NDVIFrame? {
         let dateStr = item.dateString
         let srcName = sourceID?.rawValue.uppercased() ?? "?"
@@ -729,11 +733,11 @@ class NDVIProcessor {
 
             // Sign URLs for Planetary Computer
             if let sas = sasTokenManager {
-                redURL = (try? await sas.signURL(redURL)) ?? redURL
-                nirURL = (try? await sas.signURL(nirURL)) ?? nirURL
-                if let u = greenURL { greenURL = try? await sas.signURL(u) }
-                if let u = blueURL { blueURL = try? await sas.signURL(u) }
-                if let u = sclURL { sclURL = try? await sas.signURL(u) }
+                redURL = (try? await sas.signURL(redURL, collection: collection)) ?? redURL
+                nirURL = (try? await sas.signURL(nirURL, collection: collection)) ?? nirURL
+                if let u = greenURL { greenURL = try? await sas.signURL(u, collection: collection) }
+                if let u = blueURL { blueURL = try? await sas.signURL(u, collection: collection) }
+                if let u = sclURL { sclURL = try? await sas.signURL(u, collection: collection) }
             }
 
             // Build auth headers for bearer token sources (CDSE, Earthdata)
