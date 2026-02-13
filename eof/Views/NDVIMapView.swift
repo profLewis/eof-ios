@@ -17,6 +17,7 @@ struct NDVIMapView: View {
     let basemapImage: CGImage?
     let phenologyMap: [[Float]]?
     let phenologyParam: PhenologyParameter?
+    let rejectionMap: [[Float]]?
 
     init(frame: NDVIFrame, scale: CGFloat = 8, showPolygon: Bool = false,
          showColorBar: Bool = false, displayMode: AppSettings.DisplayMode = .ndvi,
@@ -27,7 +28,8 @@ struct NDVIMapView: View {
          showMaskedClassColors: Bool = true,
          basemapImage: CGImage? = nil,
          phenologyMap: [[Float]]? = nil,
-         phenologyParam: PhenologyParameter? = nil) {
+         phenologyParam: PhenologyParameter? = nil,
+         rejectionMap: [[Float]]? = nil) {
         self.frame = frame
         self.scale = scale
         self.showPolygon = showPolygon
@@ -42,6 +44,7 @@ struct NDVIMapView: View {
         self.basemapImage = basemapImage
         self.phenologyMap = phenologyMap
         self.phenologyParam = phenologyParam
+        self.rejectionMap = rejectionMap
     }
 
     var body: some View {
@@ -70,7 +73,9 @@ struct NDVIMapView: View {
                     }
 
                 if showColorBar {
-                    if phenologyParam != nil {
+                    if rejectionMap != nil {
+                        rejectionLegend(width: imgWidth)
+                    } else if phenologyParam != nil {
                         phenologyColorBar(width: imgWidth)
                     } else if displayMode == .ndvi {
                         colorBar(width: imgWidth)
@@ -93,8 +98,12 @@ struct NDVIMapView: View {
     private func renderImage() -> CGImage? {
         var pixels: [UInt32]
 
+        // Rejection map takes highest priority
+        if let p = renderRejectionPixels() {
+            pixels = p
+        }
         // Phenology parameter map takes priority
-        if let p = renderPhenologyPixels() {
+        else if let p = renderPhenologyPixels() {
             pixels = p
         } else {
             switch displayMode {
@@ -236,6 +245,10 @@ struct NDVIMapView: View {
         }
         guard minV < maxV else { return nil }
 
+        // Clamp peak NDVI and min NDVI display ranges
+        if param == .peakNDVI { maxV = min(maxV, 1.0); minV = max(minV, 0.0) }
+        if param == .mn { maxV = min(maxV, 1.0); minV = max(minV, -0.5) }
+
         var pixels = [UInt32](repeating: 0, count: width * height)
         for row in 0..<height {
             for col in 0..<width {
@@ -280,6 +293,42 @@ struct NDVIMapView: View {
                 let s = (t - 0.5) * 2
                 return (255, UInt8((1 - s) * 255), 0)
             }
+        }
+    }
+
+    // MARK: - Rejection Map Renderer
+
+    private func renderRejectionPixels() -> [UInt32]? {
+        guard let map = rejectionMap else { return nil }
+        let width = frame.width, height = frame.height
+        guard width > 0, height > 0, map.count == height else { return nil }
+
+        var pixels = [UInt32](repeating: 0, count: width * height)
+        for row in 0..<height {
+            for col in 0..<width {
+                let val = map[row][col]
+                if val.isNaN {
+                    // Outside AOI — transparent
+                    pixels[row * width + col] = packRGBA(r: 0, g: 0, b: 0, a: 0)
+                } else {
+                    let code = Int(val)
+                    let (r, g, b, a) = rejectionColor(code)
+                    pixels[row * width + col] = packRGBA(r: r, g: g, b: b, a: a)
+                }
+            }
+        }
+        return pixels
+    }
+
+    /// Map rejection reason code to color.
+    /// 0=good (green, semi-transparent), 1=poor (red), 2=outlier (purple), 3=skipped (gray)
+    private func rejectionColor(_ code: Int) -> (UInt8, UInt8, UInt8, UInt8) {
+        switch code {
+        case 0:  return (0, 180, 0, 60)        // Good — faint green
+        case 1:  return (220, 40, 40, 200)      // Poor RMSE — red
+        case 2:  return (160, 40, 200, 200)     // Outlier — purple
+        case 3:  return (120, 120, 120, 180)    // Skipped — gray
+        default: return (0, 0, 0, 0)
         }
     }
 
@@ -475,6 +524,10 @@ struct NDVIMapView: View {
         }
         guard minV < maxV else { return AnyView(EmptyView()) }
 
+        // Clamp color bar ranges for NDVI-derived parameters
+        if param == .peakNDVI { maxV = min(maxV, 1.0); minV = max(minV, 0.0) }
+        if param == .mn { maxV = min(maxV, 1.0); minV = max(minV, -0.5) }
+
         let barH: CGFloat = max(8, scale * 0.8)
         let fontSize: CGFloat = max(7, scale * 0.7)
         let label = param.rawValue
@@ -514,6 +567,29 @@ struct NDVIMapView: View {
             .frame(width: width, height: barH + 14)
             .clipShape(Rectangle())
         })
+    }
+
+    // MARK: - Rejection Legend
+
+    private func rejectionLegend(width: CGFloat) -> some View {
+        let items: [(code: Int, label: String)] = [
+            (0, "Good"), (1, "Poor RMSE"), (2, "Outlier"), (3, "Skipped")
+        ]
+        let fontSize: CGFloat = max(7, scale * 0.7)
+        return HStack(spacing: 8) {
+            ForEach(items, id: \.code) { item in
+                HStack(spacing: 3) {
+                    let (r, g, b, _) = rejectionColor(item.code)
+                    RoundedRectangle(cornerRadius: 2)
+                        .fill(Color(red: Double(r)/255, green: Double(g)/255, blue: Double(b)/255))
+                        .frame(width: 10, height: 10)
+                    Text(item.label)
+                        .font(.system(size: fontSize))
+                        .foregroundStyle(.secondary)
+                }
+            }
+        }
+        .frame(width: width)
     }
 
     // MARK: - Color Bar

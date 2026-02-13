@@ -30,9 +30,9 @@ actor COGReader {
     // MARK: - Public API
 
     /// Read a rectangular region of UInt16 pixels from a COG.
-    func readRegion(url: URL, pixelBounds: (minCol: Int, minRow: Int, maxCol: Int, maxRow: Int)) async throws -> [[UInt16]] {
+    func readRegion(url: URL, pixelBounds: (minCol: Int, minRow: Int, maxCol: Int, maxRow: Int), authHeaders: [String: String] = [:]) async throws -> [[UInt16]] {
         let headerSize = 131072  // 128KB to capture IFD + tile arrays
-        let headerData = try await fetchRange(url: url, offset: 0, length: headerSize)
+        let headerData = try await fetchRange(url: url, offset: 0, length: headerSize, authHeaders: authHeaders)
         let ifd = try parseFirstIFD(data: headerData)
 
         // Log IFD info for diagnostics
@@ -49,12 +49,14 @@ actor COGReader {
         let offsets = try await readTileArray(
             url: url, headerData: headerData,
             arrayOffset: ifd.tileOffsetsOffset, count: ifd.tileCount,
-            valueSize: ifd.tileOffsetValueSize, isLittleEndian: ifd.isLittleEndian
+            valueSize: ifd.tileOffsetValueSize, isLittleEndian: ifd.isLittleEndian,
+            authHeaders: authHeaders
         )
         let byteCounts = try await readTileArray(
             url: url, headerData: headerData,
             arrayOffset: ifd.tileByteCountsOffset, count: ifd.tileCount,
-            valueSize: ifd.tileByteCountValueSize, isLittleEndian: ifd.isLittleEndian
+            valueSize: ifd.tileByteCountValueSize, isLittleEndian: ifd.isLittleEndian,
+            authHeaders: authHeaders
         )
 
         let outWidth = pixelBounds.maxCol - pixelBounds.minCol
@@ -73,7 +75,7 @@ actor COGReader {
                 let byteCount = byteCounts[tileIndex]
                 guard byteCount > 0 else { continue }
 
-                let tileData = try await fetchRange(url: url, offset: UInt64(offset), length: Int(byteCount))
+                let tileData = try await fetchRange(url: url, offset: UInt64(offset), length: Int(byteCount), authHeaders: authHeaders)
                 let pixels = try decompressTileU16(
                     data: tileData, ifd: ifd
                 )
@@ -303,7 +305,8 @@ actor COGReader {
 
     private func readTileArray(
         url: URL, headerData: Data,
-        arrayOffset: UInt64, count: Int, valueSize: Int, isLittleEndian: Bool
+        arrayOffset: UInt64, count: Int, valueSize: Int, isLittleEndian: Bool,
+        authHeaders: [String: String] = [:]
     ) async throws -> [UInt64] {
         let totalBytes = count * valueSize
         let offset = Int(arrayOffset)
@@ -312,7 +315,7 @@ actor COGReader {
         if offset + totalBytes <= headerData.count {
             arrayData = headerData.subdata(in: offset..<offset + totalBytes)
         } else {
-            arrayData = try await fetchRange(url: url, offset: arrayOffset, length: totalBytes)
+            arrayData = try await fetchRange(url: url, offset: arrayOffset, length: totalBytes, authHeaders: authHeaders)
         }
 
         var result = [UInt64]()
@@ -454,10 +457,13 @@ actor COGReader {
 
     // MARK: - HTTP Range Requests
 
-    private func fetchRange(url: URL, offset: UInt64, length: Int) async throws -> Data {
+    private func fetchRange(url: URL, offset: UInt64, length: Int, authHeaders: [String: String] = [:]) async throws -> Data {
         var request = URLRequest(url: url)
         request.setValue("bytes=\(offset)-\(offset + UInt64(length) - 1)", forHTTPHeaderField: "Range")
         request.timeoutInterval = 30
+        for (key, value) in authHeaders {
+            request.setValue(value, forHTTPHeaderField: key)
+        }
 
         let (data, response) = try await URLSession.shared.data(for: request)
 

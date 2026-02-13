@@ -36,6 +36,29 @@ struct GeoJSONGeometry: Codable {
             "coordinates": coordinates
         ]
     }
+
+    /// Return a new geometry with the polygon expanded outward by `meters`.
+    /// Each vertex is pushed away from the centroid by the buffer distance.
+    func buffered(meters: Double) -> GeoJSONGeometry {
+        guard meters > 0 else { return self }
+        let c = centroid
+        let metersPerDegLat = 111_320.0
+        let metersPerDegLon = 111_320.0 * cos(c.lat * .pi / 180)
+
+        let newRing: [[Double]] = coordinates[0].map { coord in
+            let lon = coord[0], lat = coord[1]
+            let dxM = (lon - c.lon) * metersPerDegLon
+            let dyM = (lat - c.lat) * metersPerDegLat
+            let dist = sqrt(dxM * dxM + dyM * dyM)
+            guard dist > 1e-6 else { return [lon, lat] }
+            // Push vertex outward along centroid→vertex direction
+            let ux = dxM / dist
+            let uy = dyM / dist
+            return [lon + ux * meters / metersPerDegLon,
+                    lat + uy * meters / metersPerDegLat]
+        }
+        return GeoJSONGeometry(type: type, coordinates: [newRing])
+    }
 }
 
 /// Load GeoJSON from a local file. Supports FeatureCollection, Feature, or bare Geometry.

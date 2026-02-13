@@ -15,6 +15,7 @@ struct PixelDetailView: View {
             ScrollView {
                 VStack(spacing: 12) {
                     pixelHeader
+                    rejectionDetailSection
                     pixelNDVIChart
                     if let fit = pixelFit, let median = medianFit {
                         parameterComparison(pixel: fit.params, median: median)
@@ -327,6 +328,53 @@ struct PixelDetailView: View {
 
     // MARK: - SCL History
 
+    // MARK: - Rejection Detail
+
+    private var rejectionDetailSection: some View {
+        Group {
+            if let detail = pixelFit?.rejectionDetail {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Rejection Reason")
+                        .font(.caption.bold())
+                    Text(detail.humanReadable)
+                        .font(.caption)
+                        .foregroundStyle(.red)
+
+                    if let zScores = detail.paramZScores, !zScores.isEmpty {
+                        Text("Parameter z-scores")
+                            .font(.system(size: 8).bold())
+                            .foregroundStyle(.purple)
+                        HStack(spacing: 0) {
+                            ForEach(zScores.sorted(by: { $0.key < $1.key }), id: \.key) { name, z in
+                                VStack(spacing: 1) {
+                                    Text(name)
+                                        .font(.system(size: 7).bold())
+                                        .foregroundStyle(.purple.opacity(0.7))
+                                    Text(String(format: "%.1f", z))
+                                        .font(.system(size: 8).monospacedDigit())
+                                        .foregroundStyle(z > 4 ? .red : .secondary)
+                                }
+                                .frame(maxWidth: .infinity)
+                            }
+                        }
+                    }
+
+                    if let dist = detail.clusterDistance, let thresh = detail.clusterThreshold {
+                        HStack {
+                            Text("Cluster distance: \(String(format: "%.1f", dist))")
+                                .font(.system(size: 9).monospacedDigit())
+                            Text("(threshold: \(String(format: "%.1f", thresh)))")
+                                .font(.system(size: 8))
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // MARK: - SCL History
+
     private var sclHistory: some View {
         let sorted = frames.sorted { $0.date < $1.date }
 
@@ -362,5 +410,148 @@ struct PixelDetailView: View {
                 }
             }
         })
+    }
+}
+
+/// Compact sheet shown when tapping a pixel in "Bad Data" mode.
+struct PixelDetailSheet: View {
+    let pixel: PixelPhenology
+    let frames: [NDVIFrame]
+
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 12) {
+                    // Quality badge
+                    HStack {
+                        let badge: (String, Color) = switch pixel.fitQuality {
+                        case .good: ("Good", .green)
+                        case .poor: ("Poor", .red)
+                        case .skipped: ("Skipped", .gray)
+                        case .outlier: ("Outlier", .purple)
+                        }
+                        Text(badge.0)
+                            .font(.caption.bold())
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 2)
+                            .background(badge.1.opacity(0.2), in: Capsule())
+                            .foregroundStyle(badge.1)
+
+                        Text("\(pixel.nValidObs) obs")
+                            .font(.caption.monospacedDigit())
+                            .foregroundStyle(.secondary)
+
+                        if pixel.fitQuality != .skipped {
+                            Text("RMSE \(String(format: "%.4f", pixel.params.rmse))")
+                                .font(.caption.monospacedDigit())
+                                .foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                    }
+
+                    // Rejection reason
+                    if let detail = pixel.rejectionDetail {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(detail.humanReadable)
+                                .font(.callout)
+                                .foregroundStyle(.red)
+
+                            if let zScores = detail.paramZScores, !zScores.isEmpty {
+                                Text("Parameter z-scores:")
+                                    .font(.caption.bold())
+                                    .foregroundStyle(.purple)
+                                HStack(spacing: 0) {
+                                    ForEach(zScores.sorted(by: { $0.key < $1.key }), id: \.key) { name, z in
+                                        VStack(spacing: 1) {
+                                            Text(name)
+                                                .font(.system(size: 8).bold())
+                                                .foregroundStyle(.purple.opacity(0.7))
+                                            Text(String(format: "%.1f", z))
+                                                .font(.system(size: 10).monospacedDigit())
+                                                .foregroundStyle(z > 4 ? .red : .secondary)
+                                        }
+                                        .frame(maxWidth: .infinity)
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Mini NDVI chart
+                    miniNDVIChart
+                }
+                .padding()
+            }
+            .navigationTitle("Pixel (\(pixel.col), \(pixel.row))")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Done") { dismiss() }
+                        .buttonStyle(.glass)
+                }
+            }
+        }
+    }
+
+    private var miniNDVIChart: some View {
+        let sorted = frames.sorted { $0.date < $1.date }
+        let cal = Calendar.current
+
+        struct Pt: Identifiable {
+            let id: String
+            let date: Date
+            let ndvi: Double
+        }
+
+        let points: [Pt] = sorted.compactMap { frame in
+            guard pixel.row < frame.height, pixel.col < frame.width else { return nil }
+            let val = frame.ndvi[pixel.row][pixel.col]
+            guard !val.isNaN else { return nil }
+            return Pt(id: frame.dateString, date: frame.date, ndvi: Double(val))
+        }
+
+        // Generate pixel fit curve
+        struct CurvePt: Identifiable {
+            let id: String
+            let date: Date
+            let ndvi: Double
+        }
+
+        var curvePts = [CurvePt]()
+        if pixel.fitQuality != .skipped, let first = sorted.first, let last = sorted.last {
+            let year = cal.component(.year, from: first.date)
+            let doyFirst = cal.ordinality(of: .day, in: .year, for: first.date) ?? 1
+            let doyLast = cal.ordinality(of: .day, in: .year, for: last.date) ?? 365
+            let step = max(1, (doyLast - doyFirst) / 50)
+            for doy in stride(from: doyFirst, through: doyLast, by: step) {
+                if let d = cal.date(from: DateComponents(year: year, day: doy)) {
+                    curvePts.append(CurvePt(
+                        id: "c_\(doy)", date: d,
+                        ndvi: pixel.params.evaluate(t: Double(doy))
+                    ))
+                }
+            }
+        }
+
+        return VStack(alignment: .leading, spacing: 2) {
+            Text("NDVI Time Series")
+                .font(.caption.bold())
+            Chart {
+                ForEach(points) { pt in
+                    PointMark(x: .value("Date", pt.date), y: .value("NDVI", pt.ndvi))
+                        .foregroundStyle(.green)
+                        .symbolSize(20)
+                }
+                ForEach(curvePts) { pt in
+                    LineMark(x: .value("Date", pt.date), y: .value("NDVI", pt.ndvi))
+                        .foregroundStyle(.yellow)
+                        .lineStyle(StrokeStyle(lineWidth: 1.5))
+                }
+            }
+            .chartYScale(domain: -0.2...1.0)
+            .frame(height: 140)
+        }
     }
 }

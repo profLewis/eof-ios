@@ -99,6 +99,21 @@ struct SettingsView: View {
 
                 Section("Filters") {
                     Toggle("Enforce AOI Polygon", isOn: $settings.enforceAOI)
+                    VStack(alignment: .leading, spacing: 4) {
+                        HStack {
+                            Text("AOI Buffer")
+                            Spacer()
+                            Text("\(Int(settings.aoiBufferMeters))m")
+                                .monospacedDigit()
+                                .foregroundStyle(.secondary)
+                        }
+                        Slider(value: $settings.aoiBufferMeters, in: 0...500, step: 10)
+                    }
+                    if settings.aoiBufferMeters > 0 {
+                        Text("Fetches \(Int(settings.aoiBufferMeters))m beyond AOI boundary. Useful for multi-resolution data fusion.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
                     Toggle("SCL Mask", isOn: $settings.cloudMask)
                     if settings.cloudMask {
                         Button {
@@ -123,7 +138,7 @@ struct SettingsView: View {
                         }
                         Slider(value: $settings.cloudThreshold, in: 0...100, step: 5)
                     }
-                    Text("SCL mask hides pixels by class. Threshold skips entire scenes.")
+                    Text("SCL mask hides pixels by class. Threshold skips entire scenes. When AOI polygon is off, all pixels in the chip are processed.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -698,7 +713,7 @@ struct SCLMaskView: View {
                         .buttonStyle(.bordered)
                         Spacer()
                         Button("Default") {
-                            settings.sclValidClasses = [4, 5, 6, 7]
+                            settings.sclValidClasses = [4, 5]
                         }
                         .buttonStyle(.bordered)
                         Spacer()

@@ -9,6 +9,7 @@ enum PixelPhenologyFitter {
         medianParams: DLParams,
         settings: PhenologyFitSettings,
         polygon: [(x: Double, y: Double)],
+        enforceAOI: Bool = true,
         onProgress: @Sendable @escaping (Double) -> Void
     ) async -> PixelPhenologyResult {
         let t0 = CFAbsoluteTimeGetCurrent()
@@ -31,10 +32,12 @@ enum PixelPhenologyFitter {
         var workItems = [PixelWork]()
         for row in 0..<height {
             for col in 0..<width {
-                // Check polygon containment (normalized coords)
-                let x = (Double(col) + 0.5) / Double(width)
-                let y = (Double(row) + 0.5) / Double(height)
-                guard NDVIProcessor.pointInPolygon(x: x, y: y, polygon: poly) else { continue }
+                // Check polygon containment (normalized coords) — skip if enforceAOI is off
+                if enforceAOI {
+                    let x = (Double(col) + 0.5) / Double(width)
+                    let y = (Double(row) + 0.5) / Double(height)
+                    guard NDVIProcessor.pointInPolygon(x: x, y: y, polygon: poly) else { continue }
+                }
 
                 // Extract time series for this pixel
                 var series = [DoubleLogistic.DataPoint]()
@@ -68,12 +71,22 @@ enum PixelPhenologyFitter {
 
                     if data.count < fitSettings.minObservations {
                         await progressActor.increment()
-                        return PixelPhenology(
+                        var px = PixelPhenology(
                             row: row, col: col,
                             params: medParams,
                             nValidObs: data.count,
                             fitQuality: .skipped
                         )
+                        px.rejectionDetail = PixelPhenology.RejectionDetail(
+                            reason: .skipped,
+                            observationCount: data.count,
+                            rmse: nil,
+                            rmseThreshold: Double(fitSettings.minObservations),
+                            clusterDistance: nil,
+                            clusterThreshold: nil,
+                            paramZScores: nil
+                        )
+                        return px
                     }
 
                     let fitted = DoubleLogistic.pixelFit(
@@ -86,12 +99,24 @@ enum PixelPhenologyFitter {
                         fitted.rmse < fitSettings.rmseThreshold ? .good : .poor
 
                     await progressActor.increment()
-                    return PixelPhenology(
+                    var px = PixelPhenology(
                         row: row, col: col,
                         params: fitted,
                         nValidObs: data.count,
                         fitQuality: quality
                     )
+                    if quality == .poor {
+                        px.rejectionDetail = PixelPhenology.RejectionDetail(
+                            reason: .poor,
+                            observationCount: data.count,
+                            rmse: fitted.rmse,
+                            rmseThreshold: fitSettings.rmseThreshold,
+                            clusterDistance: nil,
+                            clusterThreshold: nil,
+                            paramZScores: nil
+                        )
+                    }
+                    return px
                 }
             }
 

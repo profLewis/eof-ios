@@ -75,6 +75,14 @@ struct SourceBenchmarkService {
         request.setValue("bytes=0-32767", forHTTPHeaderField: "Range")
         request.timeoutInterval = 15
 
+        // Add bearer token for CDSE/Earthdata
+        if source.assetAuthType == .bearerToken {
+            let manager = BearerTokenManager(sourceID: source.sourceID)
+            if let token = try? await manager.getToken() {
+                request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+            }
+        }
+
         let start = CFAbsoluteTimeGetCurrent()
         do {
             let (_, response) = try await URLSession.shared.data(for: request)

@@ -77,6 +77,11 @@ class NDVIProcessor {
                                 let sas = SASTokenManager()
                                 _ = try await sas.getToken()
                                 sasMs = Int((CFAbsoluteTimeGetCurrent() - t1) * 1000)
+                            } else if src.assetAuthType == .bearerToken {
+                                let t1 = CFAbsoluteTimeGetCurrent()
+                                let bearer = BearerTokenManager(sourceID: src.sourceID)
+                                _ = try await bearer.getToken()
+                                sasMs = Int((CFAbsoluteTimeGetCurrent() - t1) * 1000)
                             }
                             return ProbeResult(sourceID: src.sourceID, ok: true, error: nil,
                                                searchMs: searchMs, sasMs: sasMs)
@@ -272,10 +277,15 @@ class NDVIProcessor {
             let maxConc = settings.maxConcurrent
             let cloudThreshold = settings.cloudThreshold
 
-            // Create SAS managers per source that needs them
+            // Create auth managers per source
             var sasManagers = [SourceID: SASTokenManager]()
-            for src in enabledSources where src.assetAuthType == .sasToken {
-                sasManagers[src.sourceID] = SASTokenManager()
+            var bearerManagers = [SourceID: BearerTokenManager]()
+            for src in enabledSources {
+                switch src.assetAuthType {
+                case .sasToken: sasManagers[src.sourceID] = SASTokenManager()
+                case .bearerToken: bearerManagers[src.sourceID] = BearerTokenManager(sourceID: src.sourceID)
+                case .none: break
+                }
             }
 
             // Create per-stream progress bars (one per concurrent slot)
@@ -375,6 +385,7 @@ class NDVIProcessor {
                                 cloudThreshold: cloudThreshold,
                                 bandMapping: cfg.bandMapping,
                                 sasTokenManager: sasManagers[cfg.sourceID],
+                                bearerTokenManager: bearerManagers[cfg.sourceID],
                                 sourceID: cfg.sourceID
                             )
                             return .success(frame, slot)
@@ -421,6 +432,7 @@ class NDVIProcessor {
                                 cloudThreshold: cloudThreshold,
                                 bandMapping: cfg.bandMapping,
                                 sasTokenManager: sasManagers[cfg.sourceID],
+                                bearerTokenManager: bearerManagers[cfg.sourceID],
                                 sourceID: cfg.sourceID
                             )
                             return .success(frame, slot)
@@ -682,6 +694,7 @@ class NDVIProcessor {
         cloudThreshold: Double,
         bandMapping: BandMapping = BandMapping(red: "red", nir: "nir", green: "green", blue: "blue", scl: "scl", projTransformKey: "red"),
         sasTokenManager: SASTokenManager? = nil,
+        bearerTokenManager: BearerTokenManager? = nil,
         sourceID: SourceID? = nil
     ) async throws -> NDVIFrame? {
         let dateStr = item.dateString
@@ -705,6 +718,15 @@ class NDVIProcessor {
             var blueURL = item.assets[bandMapping.blue].flatMap { URL(string: $0.href) }
             var sclURL = item.assets[bandMapping.scl].flatMap { URL(string: $0.href) }
 
+            // CDSE: translate S3 hrefs to HTTPS
+            if sourceID == .cdse {
+                redURL = Self.translateCDSEURL(redURL)
+                nirURL = Self.translateCDSEURL(nirURL)
+                greenURL = greenURL.map { Self.translateCDSEURL($0) }
+                blueURL = blueURL.map { Self.translateCDSEURL($0) }
+                sclURL = sclURL.map { Self.translateCDSEURL($0) }
+            }
+
             // Sign URLs for Planetary Computer
             if let sas = sasTokenManager {
                 redURL = (try? await sas.signURL(redURL)) ?? redURL
@@ -712,6 +734,12 @@ class NDVIProcessor {
                 if let u = greenURL { greenURL = try? await sas.signURL(u) }
                 if let u = blueURL { blueURL = try? await sas.signURL(u) }
                 if let u = sclURL { sclURL = try? await sas.signURL(u) }
+            }
+
+            // Build auth headers for bearer token sources (CDSE, Earthdata)
+            var authHeaders = [String: String]()
+            if let bearer = bearerTokenManager {
+                authHeaders = (try? await bearer.authHeaders()) ?? [:]
             }
 
             // Get projection info from asset
@@ -745,8 +773,8 @@ class NDVIProcessor {
             }
 
             // Read all available bands concurrently
-            async let redData = cogReader.readRegion(url: redURL, pixelBounds: pixelBounds)
-            async let nirData = cogReader.readRegion(url: nirURL, pixelBounds: pixelBounds)
+            async let redData = cogReader.readRegion(url: redURL, pixelBounds: pixelBounds, authHeaders: authHeaders)
+            async let nirData = cogReader.readRegion(url: nirURL, pixelBounds: pixelBounds, authHeaders: authHeaders)
 
             let red = try await redData
             let nir = try await nirData
@@ -756,28 +784,32 @@ class NDVIProcessor {
             var green: [[UInt16]]?
             var blue: [[UInt16]]?
             if mode == .fcc || mode == .rcc, let gURL = greenURL {
-                green = try? await cogReader.readRegion(url: gURL, pixelBounds: pixelBounds)
+                green = try? await cogReader.readRegion(url: gURL, pixelBounds: pixelBounds, authHeaders: authHeaders)
             }
             if mode == .rcc, let bURL = blueURL {
-                blue = try? await cogReader.readRegion(url: bURL, pixelBounds: pixelBounds)
+                blue = try? await cogReader.readRegion(url: bURL, pixelBounds: pixelBounds, authHeaders: authHeaders)
             }
 
-            // Read SCL band for cloud masking (20m resolution)
-            // Valid SCL classes come from settings
+            // Read SCL/Fmask band for cloud masking
             let sclValidValues: Set<UInt16> = Set(settings.sclValidClasses.map { UInt16($0) })
+            let isHLS = sourceID == .earthdata
             var sclMask: [[Bool]]? // true = invalid
             var sclUpsampled: [[UInt16]]? // upsampled SCL values for display
             if let sURL = sclURL {
-                // SCL is 20m (half resolution of 10m bands)
-                let sclBounds = (
-                    minCol: pixelBounds.minCol / 2,
-                    minRow: pixelBounds.minRow / 2,
-                    maxCol: (pixelBounds.maxCol + 1) / 2,
-                    maxRow: (pixelBounds.maxRow + 1) / 2
-                )
-                if let sclData = try? await cogReader.readRegion(url: sURL, pixelBounds: sclBounds) {
+                // S2 SCL is 20m (half resolution); HLS Fmask is same resolution as bands (30m)
+                let sclBounds: (minCol: Int, minRow: Int, maxCol: Int, maxRow: Int)
+                if isHLS {
+                    sclBounds = pixelBounds  // HLS: all bands at same resolution
+                } else {
+                    sclBounds = (
+                        minCol: pixelBounds.minCol / 2,
+                        minRow: pixelBounds.minRow / 2,
+                        maxCol: (pixelBounds.maxCol + 1) / 2,
+                        maxRow: (pixelBounds.maxRow + 1) / 2
+                    )
+                }
+                if let sclData = try? await cogReader.readRegion(url: sURL, pixelBounds: sclBounds, authHeaders: authHeaders) {
                     // Upsample SCL mask to 10m pixel grid (nearest neighbor)
-                    // Account for pixel alignment: 10m pixel (minRow+r) maps to SCL pixel (minRow+r)/2
                     var mask = [[Bool]](repeating: [Bool](repeating: true, count: width), count: height)
                     var sclUp = [[UInt16]](repeating: [UInt16](repeating: 0, count: width), count: height)
                     let sclH = sclData.count
@@ -786,13 +818,27 @@ class NDVIProcessor {
                     let sclMinCol = sclBounds.minCol
                     for row in 0..<height {
                         for col in 0..<width {
-                            // Map 10m global pixel to 20m local SCL index
-                            let sclRow = min((pixelBounds.minRow + row) / 2 - sclMinRow, sclH - 1)
-                            let sclCol = min((pixelBounds.minCol + col) / 2 - sclMinCol, sclW - 1)
+                            let sclRow: Int
+                            let sclCol: Int
+                            if isHLS {
+                                // HLS: same resolution, direct mapping
+                                sclRow = min(row, sclH - 1)
+                                sclCol = min(col, sclW - 1)
+                            } else {
+                                // S2: map 10m global pixel to 20m local SCL index
+                                sclRow = min((pixelBounds.minRow + row) / 2 - sclMinRow, sclH - 1)
+                                sclCol = min((pixelBounds.minCol + col) / 2 - sclMinCol, sclW - 1)
+                            }
                             if sclRow >= 0 && sclRow < sclH && sclCol >= 0 && sclCol < sclW {
                                 let val = sclData[sclRow][sclCol]
                                 sclUp[row][col] = val
-                                mask[row][col] = !sclValidValues.contains(val)
+                                if isHLS {
+                                    // HLS Fmask: bitmask — bit 1 = cloud, bit 2 = cloud shadow
+                                    let cloudBits = (val >> 1) & 0x03
+                                    mask[row][col] = cloudBits != 0
+                                } else {
+                                    mask[row][col] = !sclValidValues.contains(val)
+                                }
                             }
                         }
                     }
@@ -1006,6 +1052,16 @@ class NDVIProcessor {
         if updated > 0 {
             log.info("Recomputed stats for \(updated) frames (SCL valid=\(settings.sclValidClasses.sorted()), cloudMask=\(useCloudMask))")
         }
+    }
+
+    /// Translate CDSE S3 hrefs to HTTPS URLs.
+    private static func translateCDSEURL(_ url: URL) -> URL {
+        let str = url.absoluteString
+        if str.hasPrefix("s3://eodata/") {
+            let https = str.replacingOccurrences(of: "s3://eodata/", with: "https://eodata.dataspace.copernicus.eu/")
+            return URL(string: https) ?? url
+        }
+        return url
     }
 
     /// Ray-casting point-in-polygon test.

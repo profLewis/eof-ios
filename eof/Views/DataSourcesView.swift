@@ -5,6 +5,10 @@ struct DataSourcesView: View {
     @State private var settings = AppSettings.shared
     @State private var isBenchmarking = false
     @State private var pcAPIKey: String = KeychainService.retrieve(key: "planetary.apikey") ?? ""
+    @State private var cdseUsername: String = KeychainService.retrieve(key: "cdse.username") ?? ""
+    @State private var cdsePassword: String = KeychainService.retrieve(key: "cdse.password") ?? ""
+    @State private var earthdataUsername: String = KeychainService.retrieve(key: "earthdata.username") ?? ""
+    @State private var earthdataPassword: String = KeychainService.retrieve(key: "earthdata.password") ?? ""
 
     var body: some View {
         NavigationStack {
@@ -55,7 +59,9 @@ struct DataSourcesView: View {
                     }
                 }
 
-                Section("Planetary Computer Credentials") {
+                // MARK: - Credentials
+
+                Section("Planetary Computer") {
                     SecureField("API Key (optional)", text: $pcAPIKey)
                         .textContentType(.password)
                         .autocorrectionDisabled()
@@ -66,9 +72,60 @@ struct DataSourcesView: View {
                                 try? KeychainService.store(key: "planetary.apikey", value: pcAPIKey)
                             }
                         }
-                    Text("Optional. Planetary Computer works without an API key but rate limits may apply.")
+                    Text("Optional. Works without an API key but rate limits may apply.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                }
+
+                Section("Copernicus Data Space (CDSE)") {
+                    TextField("Username (email)", text: $cdseUsername)
+                        .textContentType(.emailAddress)
+                        .autocorrectionDisabled()
+                        .textInputAutocapitalization(.never)
+                        .onChange(of: cdseUsername) { storeCredential(key: "cdse.username", value: cdseUsername) }
+                    SecureField("Password", text: $cdsePassword)
+                        .textContentType(.password)
+                        .onChange(of: cdsePassword) { storeCredential(key: "cdse.password", value: cdsePassword) }
+                    Text("Free registration required. Provides Sentinel-2 L2A via Copernicus Data Space.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Link("Register at dataspace.copernicus.eu",
+                         destination: URL(string: "https://dataspace.copernicus.eu")!)
+                        .font(.caption)
+                }
+
+                Section("NASA Earthdata (HLS)") {
+                    TextField("Username", text: $earthdataUsername)
+                        .textContentType(.username)
+                        .autocorrectionDisabled()
+                        .textInputAutocapitalization(.never)
+                        .onChange(of: earthdataUsername) { storeCredential(key: "earthdata.username", value: earthdataUsername) }
+                    SecureField("Password", text: $earthdataPassword)
+                        .textContentType(.password)
+                        .onChange(of: earthdataPassword) { storeCredential(key: "earthdata.password", value: earthdataPassword) }
+                    Text("Free registration required. Provides Harmonized Landsat Sentinel-2 (HLS) at 30m.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Link("Register at urs.earthdata.nasa.gov",
+                         destination: URL(string: "https://urs.earthdata.nasa.gov/users/new")!)
+                        .font(.caption)
+                }
+
+                Section("Google Earth Engine") {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Label("Requires GEE account", systemImage: "info.circle")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Text("Google Earth Engine provides access to all major EO sensors (Sentinel-2, Landsat, MODIS, VIIRS). Requires a Google Cloud project with Earth Engine API enabled.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Link("Open Earth Engine",
+                             destination: URL(string: "https://earthengine.google.com")!)
+                            .font(.caption)
+                        Link("Setup Guide",
+                             destination: URL(string: "https://developers.google.com/earth-engine/guides/access")!)
+                            .font(.caption)
+                    }
                 }
 
                 Section("Performance") {
@@ -149,6 +206,14 @@ struct DataSourcesView: View {
             Text(result.latencyLabel)
                 .font(.caption)
                 .foregroundStyle(.secondary)
+        }
+    }
+
+    private func storeCredential(key: String, value: String) {
+        if value.isEmpty {
+            KeychainService.delete(key: key)
+        } else {
+            try? KeychainService.store(key: key, value: value)
         }
     }
 

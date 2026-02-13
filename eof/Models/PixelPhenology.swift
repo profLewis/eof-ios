@@ -7,12 +7,41 @@ struct PixelPhenology {
     let params: DLParams
     let nValidObs: Int
     let fitQuality: FitQuality
+    var rejectionDetail: RejectionDetail?
 
     enum FitQuality: String {
         case good
         case poor
         case skipped
         case outlier
+    }
+
+    /// Detail about why a pixel was rejected (nil for good-fit pixels).
+    struct RejectionDetail {
+        let reason: FitQuality
+        let observationCount: Int
+        let rmse: Double?
+        let rmseThreshold: Double?
+        let clusterDistance: Double?
+        let clusterThreshold: Double?
+        let paramZScores: [String: Double]?
+
+        var humanReadable: String {
+            switch reason {
+            case .skipped:
+                return "Insufficient observations (\(observationCount))"
+            case .poor:
+                let r = rmse.map { String(format: "%.4f", $0) } ?? "?"
+                let t = rmseThreshold.map { String(format: "%.4f", $0) } ?? "?"
+                return "Poor fit (RMSE \(r) > \(t))"
+            case .outlier:
+                let d = clusterDistance.map { String(format: "%.1f", $0) } ?? "?"
+                let t = clusterThreshold.map { String(format: "%.1f", $0) } ?? "?"
+                return "Outlier parameters (distance \(d) > \(t))"
+            case .good:
+                return "Good fit"
+            }
+        }
     }
 }
 
@@ -72,6 +101,24 @@ struct PixelPhenologyResult {
             let q3 = values[min(n - 1, 3 * n / 4)]
             return (name: name, median: median, iqr: q3 - q1)
         }
+    }
+
+    /// A 2D map of rejection reason codes for rendering:
+    /// 0 = good/nil, 1 = poor, 2 = outlier, 3 = skipped
+    func rejectionReasonMap() -> [[Float]] {
+        var map = [[Float]](repeating: [Float](repeating: Float.nan, count: width), count: height)
+        for row in 0..<height {
+            for col in 0..<width {
+                guard let px = pixels[row][col] else { continue }
+                switch px.fitQuality {
+                case .good:   map[row][col] = 0
+                case .poor:   map[row][col] = 1
+                case .outlier: map[row][col] = 2
+                case .skipped: map[row][col] = 3
+                }
+            }
+        }
+        return map
     }
 
     /// Compute filtered median NDVI per frame, excluding non-good pixels.
@@ -195,18 +242,34 @@ struct PixelPhenologyResult {
             }
         }
 
-        // Step 3: Apply final outlier flags
+        // Step 3: Apply final outlier flags with rejection detail
+        let paramNames = ["mn", "mx", "sos", "rsp", "eos", "rau"]
         var newPixels = pixels
         for row in 0..<height {
             for col in 0..<width {
                 guard let px = pixels[row][col], px.fitQuality == .good else { continue }
                 if isOutlier[row][col] {
-                    newPixels[row][col] = PixelPhenology(
+                    // Compute per-parameter z-scores for this pixel
+                    var zScores = [String: Double]()
+                    for (i, key) in paramKeys.enumerated() {
+                        zScores[paramNames[i]] = abs(key(px.params) - medians[i]) / mads[i]
+                    }
+                    var outlierPx = PixelPhenology(
                         row: row, col: col,
                         params: px.params,
                         nValidObs: px.nValidObs,
                         fitQuality: .outlier
                     )
+                    outlierPx.rejectionDetail = PixelPhenology.RejectionDetail(
+                        reason: .outlier,
+                        observationCount: px.nValidObs,
+                        rmse: px.params.rmse,
+                        rmseThreshold: nil,
+                        clusterDistance: distances[row][col],
+                        clusterThreshold: threshold,
+                        paramZScores: zScores
+                    )
+                    newPixels[row][col] = outlierPx
                 }
             }
         }

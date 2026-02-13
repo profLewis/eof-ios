@@ -16,7 +16,7 @@ struct ContentView: View {
     @State private var lastStartDate: String = ""
     @State private var lastEndDate: String = ""
     @State private var lastNDVIThreshold: Float = 0.2
-    @State private var lastSCLClasses: Set<Int> = [4, 5, 6, 7]
+    @State private var lastSCLClasses: Set<Int> = [4, 5]
     @State private var lastCloudMask: Bool = true
     @State private var lastEnforceAOI: Bool = true
     @State private var basemapImage: CGImage?
@@ -35,12 +35,21 @@ struct ContentView: View {
     // Cluster filter
     @State private var unfilteredPhenology: PixelPhenologyResult?
     @State private var isClusterFiltered = false
+    @State private var showBadData = false
+    @State private var tappedPixelDetail: PixelPhenology?
+    @State private var showingPixelDetail = false
     // Sub-AOI selection
     @State private var isSelectMode = false
     @State private var selectionStart: CGPoint?
     @State private var selectionEnd: CGPoint?
-    @State private var selectionRect: (minRow: Int, maxRow: Int, minCol: Int, maxCol: Int)?
-    @State private var showingSelectionAnalysis = false
+    @State private var selectionItem: SelectionItem?
+    // Zoom
+    @State private var imageZoomScale: CGFloat = 1.0
+
+    struct SelectionItem: Identifiable {
+        let id = UUID()
+        let minRow: Int, maxRow: Int, minCol: Int, maxCol: Int
+    }
 
     var body: some View {
         NavigationStack {
@@ -186,17 +195,20 @@ struct ContentView: View {
                         .presentationDetents([.large])
                 }
             }
-            .sheet(isPresented: $showingSelectionAnalysis) {
-                if let sel = selectionRect {
-                    SelectionAnalysisView(
-                        isPresented: $showingSelectionAnalysis,
-                        minRow: sel.minRow, maxRow: sel.maxRow,
-                        minCol: sel.minCol, maxCol: sel.maxCol,
-                        frames: processor.frames,
-                        pixelPhenology: pixelPhenology,
-                        medianFit: dlBest
-                    )
-                    .presentationDetents([.large])
+            .sheet(item: $selectionItem) { sel in
+                SelectionAnalysisView(
+                    minRow: sel.minRow, maxRow: sel.maxRow,
+                    minCol: sel.minCol, maxCol: sel.maxCol,
+                    frames: processor.frames,
+                    pixelPhenology: pixelPhenology,
+                    medianFit: dlBest
+                )
+                .presentationDetents([.large])
+            }
+            .sheet(isPresented: $showingPixelDetail) {
+                if let px = tappedPixelDetail {
+                    PixelDetailSheet(pixel: px, frames: processor.frames)
+                        .presentationDetents([.medium])
                 }
             }
         }
@@ -325,18 +337,20 @@ struct ContentView: View {
                     let currentPhenoMap: [[Float]]? = phenologyDisplayParam.flatMap { param in
                         pixelPhenology?.parameterMap(param)
                     }
+                    let currentRejectionMap: [[Float]]? = showBadData ? pixelPhenology?.rejectionReasonMap() : nil
 
                     NDVIMapView(frame: frame, showPolygon: true, showColorBar: true,
                                 displayMode: settings.displayMode,
                                 cloudMask: settings.cloudMask,
                                 ndviThreshold: settings.ndviThreshold,
                                 sclValidClasses: settings.sclValidClasses,
-                                showSCLBoundaries: phenologyDisplayParam == nil && settings.showSCLBoundaries,
+                                showSCLBoundaries: phenologyDisplayParam == nil && !showBadData && settings.showSCLBoundaries,
                                 enforceAOI: settings.enforceAOI,
                                 showMaskedClassColors: settings.showMaskedClassColors,
                                 basemapImage: settings.showBasemap ? basemapImage : nil,
-                                phenologyMap: showData ? currentPhenoMap : nil,
-                                phenologyParam: showData ? phenologyDisplayParam : nil)
+                                phenologyMap: showData && !showBadData ? currentPhenoMap : nil,
+                                phenologyParam: showData && !showBadData ? phenologyDisplayParam : nil,
+                                rejectionMap: showData ? currentRejectionMap : nil)
                         .clipShape(RoundedRectangle(cornerRadius: 8))
                         .shadow(radius: 2)
                         .opacity(showData ? 1.0 : 0.0)
@@ -348,11 +362,38 @@ struct ContentView: View {
                                     .clipShape(RoundedRectangle(cornerRadius: 8))
                             }
                         }
+                        .scaleEffect(imageZoomScale)
+                        .gesture(
+                            MagnifyGesture()
+                                .onChanged { value in
+                                    imageZoomScale = max(1.0, min(8.0, value.magnification))
+                                }
+                                .onEnded { value in
+                                    withAnimation(.easeOut(duration: 0.2)) {
+                                        imageZoomScale = max(1.0, min(8.0, value.magnification))
+                                    }
+                                }
+                        )
+                        .onTapGesture(count: 2) {
+                            withAnimation(.easeInOut(duration: 0.3)) {
+                                imageZoomScale = imageZoomScale > 1.5 ? 1.0 : 3.0
+                            }
+                        }
                         .contentShape(Rectangle())
-                        .onTapGesture {
-                            if isSelectMode {
-                                // tap in select mode clears selection
-                                selectionRect = nil
+                        .onTapGesture { location in
+                            if showBadData, let pp = pixelPhenology {
+                                // Tap-to-inspect bad pixel
+                                let imgW = CGFloat(frame.width) * 8
+                                let imgH = CGFloat(frame.height) * 8
+                                let col = Int(location.x / imgW * CGFloat(frame.width))
+                                let row = Int(location.y / imgH * CGFloat(frame.height))
+                                if row >= 0, row < pp.height, col >= 0, col < pp.width,
+                                   let px = pp.pixels[row][col] {
+                                    tappedPixelDetail = px
+                                    showingPixelDetail = true
+                                }
+                            } else if isSelectMode {
+                                selectionItem = nil
                                 selectionStart = nil
                                 selectionEnd = nil
                             } else {
@@ -437,6 +478,14 @@ struct ContentView: View {
                                         .font(.caption)
                                         .padding(6)
                                         .background(isSelectMode ? AnyShapeStyle(.yellow.opacity(0.3)) : AnyShapeStyle(.ultraThinMaterial), in: Circle())
+                                }
+                                Button {
+                                    copyCurrentFrame(frame: frame)
+                                } label: {
+                                    Image(systemName: "doc.on.doc")
+                                        .font(.caption)
+                                        .padding(6)
+                                        .background(.ultraThinMaterial, in: Circle())
                                 }
                             }
                             .padding(6)
@@ -913,6 +962,11 @@ struct ContentView: View {
                     .font(.caption)
                     .buttonStyle(.bordered)
                     .tint(.purple.opacity(0.7))
+
+                    Toggle("Bad Data", isOn: $showBadData)
+                        .toggleStyle(.button)
+                        .font(.caption)
+                        .tint(.red)
                 }
             }
 
@@ -922,6 +976,7 @@ struct ContentView: View {
                     HStack(spacing: 4) {
                         Button("Live") {
                             phenologyDisplayParam = nil
+                            startPlayback()
                         }
                         .font(.system(size: 9))
                         .buttonStyle(.bordered)
@@ -1092,12 +1147,14 @@ struct ContentView: View {
                          sp: settings.pixelSlopePerturbation, nRuns: settings.pixelEnsembleRuns,
                          minSL: Double(settings.minSeasonLength), maxSL: Double(settings.maxSeasonLength))
 
+        let enforceAOI = settings.enforceAOI
         Task.detached {
             let result = await PixelPhenologyFitter.fitAllPixels(
                 frames: frames,
                 medianParams: medianFit,
                 settings: fitSettings,
                 polygon: polygon,
+                enforceAOI: enforceAOI,
                 onProgress: { progress in
                     Task { @MainActor in
                         pixelFitProgress = progress
@@ -1316,7 +1373,16 @@ struct ContentView: View {
 
         log.success("AOI loaded: \(geometry.polygon.count) vertices")
         let c = geometry.centroid
-        log.info("Centroid: \(String(format: "%.4f", c.lon))E, \(String(format: "%.4f", c.lat))S")
+        log.info("Centroid: \(String(format: "%.4f", c.lon))E, \(String(format: "%.4f", c.lat))N")
+
+        // Apply buffer if configured
+        let fetchGeometry: GeoJSONGeometry
+        if settings.aoiBufferMeters > 0 {
+            fetchGeometry = geometry.buffered(meters: settings.aoiBufferMeters)
+            log.info("AOI buffered by \(Int(settings.aoiBufferMeters))m for fetch")
+        } else {
+            fetchGeometry = geometry
+        }
 
         lastStartDate = settings.startDateString
         lastEndDate = settings.endDateString
@@ -1327,7 +1393,7 @@ struct ContentView: View {
 
         Task {
             await processor.fetch(
-                geometry: geometry,
+                geometry: fetchGeometry,
                 startDate: settings.startDateString,
                 endDate: settings.endDateString
             )
@@ -1454,9 +1520,36 @@ struct ContentView: View {
             return
         }
 
-        selectionRect = (minRow: minRow, maxRow: maxRow, minCol: minCol, maxCol: maxCol)
+        selectionItem = SelectionItem(minRow: minRow, maxRow: maxRow, minCol: minCol, maxCol: maxCol)
         log.info("Selected \(maxCol - minCol + 1)x\(maxRow - minRow + 1) px, \(validCount) valid")
-        showingSelectionAnalysis = true
+    }
+
+    @MainActor
+    private func copyCurrentFrame(frame: NDVIFrame) {
+        let currentPhenoMap: [[Float]]? = phenologyDisplayParam.flatMap { p in
+            pixelPhenology?.parameterMap(p)
+        }
+        let rejMap: [[Float]]? = showBadData ? pixelPhenology?.rejectionReasonMap() : nil
+        let view = NDVIMapView(
+            frame: frame, scale: 8, showPolygon: true, showColorBar: true,
+            displayMode: settings.displayMode,
+            cloudMask: settings.cloudMask,
+            ndviThreshold: settings.ndviThreshold,
+            sclValidClasses: settings.sclValidClasses,
+            showSCLBoundaries: settings.showSCLBoundaries,
+            enforceAOI: settings.enforceAOI,
+            showMaskedClassColors: settings.showMaskedClassColors,
+            basemapImage: settings.showBasemap ? basemapImage : nil,
+            phenologyMap: showData && !showBadData ? currentPhenoMap : nil,
+            phenologyParam: showData && !showBadData ? phenologyDisplayParam : nil,
+            rejectionMap: showData ? rejMap : nil
+        )
+        let renderer = ImageRenderer(content: view)
+        renderer.scale = 2.0
+        if let uiImage = renderer.uiImage {
+            UIPasteboard.general.image = uiImage
+            log.info("Copied frame \(frame.dateString) to clipboard")
+        }
     }
 
     private func openInMaps() {

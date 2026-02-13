@@ -46,4 +46,16 @@ enum AOIGeometry {
 
         return GeoJSONGeometry(type: "Polygon", coordinates: [ring])
     }
+
+    /// Generate a GeoJSON rectangle from bounding box coordinates.
+    static func generateRect(minLat: Double, minLon: Double, maxLat: Double, maxLon: Double) -> GeoJSONGeometry {
+        let ring: [[Double]] = [
+            [minLon, minLat],
+            [maxLon, minLat],
+            [maxLon, maxLat],
+            [minLon, maxLat],
+            [minLon, minLat],
+        ]
+        return GeoJSONGeometry(type: "Polygon", coordinates: [ring])
+    }
 }

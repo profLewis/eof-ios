@@ -4,12 +4,13 @@ import Charts
 /// Analysis sheet for a sub-AOI rectangle selection on the movie.
 /// Shows mean NDVI, reflectance spectra, and phenology for the selected pixels.
 struct SelectionAnalysisView: View {
-    @Binding var isPresented: Bool
     let minRow: Int, maxRow: Int
     let minCol: Int, maxCol: Int
     let frames: [NDVIFrame]
     let pixelPhenology: PixelPhenologyResult?
     let medianFit: DLParams?
+
+    @Environment(\.dismiss) private var dismiss
 
     // Async-computed results
     @State private var isProcessing = true
@@ -33,7 +34,7 @@ struct SelectionAnalysisView: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
-                    Button("Done") { isPresented = false }
+                    Button("Done") { dismiss() }
                         .buttonStyle(.glass)
                 }
             }

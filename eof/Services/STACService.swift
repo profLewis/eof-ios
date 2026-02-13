@@ -36,12 +36,8 @@ struct STACService {
             var request = URLRequest(url: url)
             request.timeoutInterval = 30
 
-            // Add optional API key header for Planetary Computer
-            if config.sourceID == .planetary,
-               let apiKey = KeychainService.retrieve(key: "planetary.apikey"),
-               !apiKey.isEmpty {
-                request.setValue(apiKey, forHTTPHeaderField: "Ocp-Apim-Subscription-Key")
-            }
+            // Apply source-specific auth headers for search
+            applySearchAuth(to: &request)
 
             let data: Data
             let response: URLResponse
@@ -85,6 +81,25 @@ struct STACService {
 
         // Sort by date
         return filtered.sorted { ($0.date ?? .distantPast) < ($1.date ?? .distantPast) }
+    }
+
+    /// Apply source-specific auth headers for STAC search requests.
+    private func applySearchAuth(to request: inout URLRequest) {
+        switch config.sourceID {
+        case .planetary:
+            if let apiKey = KeychainService.retrieve(key: "planetary.apikey"),
+               !apiKey.isEmpty {
+                request.setValue(apiKey, forHTTPHeaderField: "Ocp-Apim-Subscription-Key")
+            }
+        case .earthdata:
+            // Earthdata STAC search is public, no auth needed
+            break
+        case .cdse:
+            // CDSE catalogue search is public, no auth needed for search
+            break
+        case .aws:
+            break
+        }
     }
 
     /// Pick the MGRS tile that appears most frequently and filter to just those items.

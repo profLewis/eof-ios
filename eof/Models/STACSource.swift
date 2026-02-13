@@ -4,7 +4,8 @@ import Foundation
 enum SourceID: String, CaseIterable, Codable, Identifiable {
     case aws = "aws"
     case planetary = "planetary"
-    // case cdse = "cdse"       // future: JP2K format, not COG
+    case cdse = "cdse"
+    case earthdata = "earthdata"
 
     var id: String { rawValue }
 
@@ -12,6 +13,8 @@ enum SourceID: String, CaseIterable, Codable, Identifiable {
         switch self {
         case .aws: return "cloud"
         case .planetary: return "globe.americas"
+        case .cdse: return "globe.europe.africa"
+        case .earthdata: return "globe.central.south.asia"
         }
     }
 }
@@ -30,7 +33,7 @@ struct BandMapping: Codable, Equatable {
 enum AssetAuthType: String, Codable {
     case none
     case sasToken       // Microsoft Planetary Computer
-    case oauth2         // CDSE (future)
+    case bearerToken    // CDSE, NASA Earthdata
 }
 
 /// Complete configuration for a single STAC source.
@@ -77,6 +80,40 @@ struct STACSourceConfig: Codable, Identifiable, Equatable {
             bandMapping: BandMapping(
                 red: "B04", nir: "B08", green: "B03",
                 blue: "B02", scl: "SCL",
+                projTransformKey: "B04"
+            )
+        )
+    }
+
+    static func cdseDefault() -> STACSourceConfig {
+        STACSourceConfig(
+            sourceID: .cdse,
+            isEnabled: false,
+            displayName: "Copernicus Data Space",
+            shortName: "CDSE",
+            searchURL: "https://catalogue.dataspace.copernicus.eu/odata/v1/Products",
+            collection: "sentinel-2-l2a",
+            assetAuthType: .bearerToken,
+            bandMapping: BandMapping(
+                red: "B04", nir: "B08", green: "B03",
+                blue: "B02", scl: "SCL",
+                projTransformKey: "B04"
+            )
+        )
+    }
+
+    static func earthdataDefault() -> STACSourceConfig {
+        STACSourceConfig(
+            sourceID: .earthdata,
+            isEnabled: false,
+            displayName: "NASA Earthdata (HLS)",
+            shortName: "NASA",
+            searchURL: "https://cmr.earthdata.nasa.gov/stac/LPCLOUD/search",
+            collection: "HLSS30.v2.0",
+            assetAuthType: .bearerToken,
+            bandMapping: BandMapping(
+                red: "B04", nir: "B8A", green: "B03",
+                blue: "B02", scl: "Fmask",
                 projTransformKey: "B04"
             )
         )

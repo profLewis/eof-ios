@@ -126,8 +126,8 @@ enum DoubleLogistic {
         let x0 = initial.asArray
 
         // Parameter bounds (for clamping)
-        let lo = [-0.5, 0.0, 1.0, 0.001, 100.0, 0.001]
-        let hi = [0.8, 1.2, 250.0, 0.5, 366.0, 0.5]
+        let lo = [-0.5, 0.0, 1.0, 0.08, 100.0, 0.08]
+        let hi = [0.8, 1.0, 250.0, 0.6, 366.0, 0.6]
 
         func clamp(_ x: [Double]) -> [Double] {
             var c = x
@@ -220,6 +220,8 @@ enum DoubleLogistic {
         }
 
         var best = DLParams.from(clamp(simplex[0]))
+        // Enforce mx > mn post-optimization
+        if best.mx <= best.mn { best.mx = best.mn + 0.05 }
         best.rmse = rmse(params: best, data: data)  // true RMSE for quality reporting
         return best
     }
@@ -311,11 +313,15 @@ enum DoubleLogistic {
                 perturbed.rau += guess.rau * Double.random(in: -sp...sp)
                 // Clamp to physical bounds
                 perturbed.mn = max(-0.5, min(0.8, perturbed.mn))
-                perturbed.mx = max(0.0, min(1.2, perturbed.mx))
+                perturbed.mx = max(0.0, min(1.0, perturbed.mx))
                 perturbed.sos = max(1, min(250, perturbed.sos))
-                perturbed.rsp = max(0.001, min(0.5, perturbed.rsp))
+                perturbed.rsp = max(0.08, min(0.6, perturbed.rsp))
                 perturbed.eos = max(100, min(366, perturbed.eos))
-                perturbed.rau = max(0.001, min(0.5, perturbed.rau))
+                perturbed.rau = max(0.08, min(0.6, perturbed.rau))
+                // Enforce mx > mn
+                if perturbed.mx <= perturbed.mn {
+                    perturbed.mx = perturbed.mn + 0.1
+                }
             }
             let fitted = fit(data: filtered, initial: perturbed,
                            minSeasonLength: minSeasonLength, maxSeasonLength: maxSeasonLength)
@@ -361,11 +367,15 @@ enum DoubleLogistic {
             perturbed.rau += medianParams.rau * Double.random(in: -sp...sp)
             // Clamp to bounds
             perturbed.mn  = max(-0.5, min(0.8, perturbed.mn))
-            perturbed.mx  = max(0.0, min(1.2, perturbed.mx))
+            perturbed.mx  = max(0.0, min(1.0, perturbed.mx))
             perturbed.sos = max(1, min(250, perturbed.sos))
-            perturbed.rsp = max(0.001, min(0.5, perturbed.rsp))
+            perturbed.rsp = max(0.08, min(0.6, perturbed.rsp))
             perturbed.eos = max(100, min(366, perturbed.eos))
-            perturbed.rau = max(0.001, min(0.5, perturbed.rau))
+            perturbed.rau = max(0.08, min(0.6, perturbed.rau))
+            // Enforce mx > mn
+            if perturbed.mx <= perturbed.mn {
+                perturbed.mx = perturbed.mn + 0.1
+            }
 
             let candidate = fit(data: filtered, initial: perturbed, maxIter: settings.maxIter,
                               minSeasonLength: settings.minSeasonLength, maxSeasonLength: settings.maxSeasonLength)

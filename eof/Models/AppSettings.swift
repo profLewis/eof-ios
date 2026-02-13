@@ -20,6 +20,8 @@ class AppSettings {
         case url(String)
         case file(URL)
         case manual(lat: Double, lon: Double, diameter: Double, shape: ManualShape)
+        case mapRect(minLat: Double, minLon: Double, maxLat: Double, maxLon: Double)
+        case location(lat: Double, lon: Double, diameter: Double)
     }
 
     enum ManualShape: String, CaseIterable {
@@ -39,6 +41,7 @@ class AppSettings {
     var enforceAOI: Bool = true { didSet { save() } }
     var showMaskedClassColors: Bool = false { didSet { save() } }
     var showBasemap: Bool = true { didSet { save() } }
+    var aoiBufferMeters: Double = 50 { didSet { save() } }
 
     // Per-pixel phenology settings
     var pixelEnsembleRuns: Int = 5 { didSet { save() } }
@@ -51,7 +54,7 @@ class AppSettings {
     var maxSeasonLength: Int = 150 { didSet { save() } }
 
     /// SCL classes to treat as VALID (not masked). User can toggle each.
-    var sclValidClasses: Set<Int> = [4, 5, 6, 7] { didSet { save() } }
+    var sclValidClasses: Set<Int> = [4, 5] { didSet { save() } }
 
     /// All SCL class definitions
     static let sclClassNames: [(value: Int, name: String)] = [
@@ -70,7 +73,7 @@ class AppSettings {
     ]
 
     // Data Sources (order = trust priority)
-    var sources: [STACSourceConfig] = [.planetaryDefault(), .awsDefault()]
+    var sources: [STACSourceConfig] = [.planetaryDefault(), .awsDefault(), .cdseDefault(), .earthdataDefault()]
     var benchmarkResults: [SourceBenchmark] = []
     var smartAllocation: Bool = true
 
@@ -119,6 +122,10 @@ class AppSettings {
             return "File: \(u.lastPathComponent)"
         case .manual(let lat, let lon, let d, let shape):
             return "\(shape.rawValue) \(Int(d))m at \(String(format: "%.4f", lat)), \(String(format: "%.4f", lon))"
+        case .mapRect(let minLat, _, let maxLat, _):
+            return "Map rect \(String(format: "%.3f", minLat))\u{2013}\(String(format: "%.3f", maxLat))"
+        case .location(let lat, let lon, let d):
+            return "My location \(Int(d))m at \(String(format: "%.4f", lat)), \(String(format: "%.4f", lon))"
         }
     }
 
@@ -170,6 +177,7 @@ class AppSettings {
         defaults.set(clusterFilterThreshold, forKey: prefix + "clusterFilterThreshold")
         defaults.set(minSeasonLength, forKey: prefix + "minSeasonLength")
         defaults.set(maxSeasonLength, forKey: prefix + "maxSeasonLength")
+        defaults.set(aoiBufferMeters, forKey: prefix + "aoiBufferMeters")
     }
 
     private func load() {
@@ -220,6 +228,8 @@ class AppSettings {
         if msl > 0 { minSeasonLength = msl }
         let mxl = defaults.integer(forKey: prefix + "maxSeasonLength")
         if mxl > 0 { maxSeasonLength = mxl }
+        let abm = defaults.double(forKey: prefix + "aoiBufferMeters")
+        if abm > 0 { aoiBufferMeters = abm }
     }
 
     var startDateString: String {
