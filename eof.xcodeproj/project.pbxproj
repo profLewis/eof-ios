@@ -1,0 +1,474 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 56;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		A10001 /* eofApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10001; };
+		A10002 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10002; };
+		A10003 /* NDVIMapView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10003; };
+		A10004 /* GeoJSON.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10004; };
+		A10005 /* STACModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10005; };
+		A10006 /* UTMProjection.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10006; };
+		A10007 /* NDVIFrame.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10007; };
+		A10008 /* STACService.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10008; };
+		A10009 /* COGReader.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10009; };
+		A10010 /* NDVIProcessor.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10010; };
+		A10011 /* SF_field.geojson in Resources */ = {isa = PBXBuildFile; fileRef = B10011; };
+		A10012 /* ActivityLog.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10012; };
+		D10F000000000000000002 /* AppSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = D10F000000000000000001; };
+		D10F000000000000000004 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D10F000000000000000003; };
+		D10F000000000000000006 /* AOIGeometry.swift in Sources */ = {isa = PBXBuildFile; fileRef = D10F000000000000000005; };
+		D10F000000000000000008 /* AOIView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D10F000000000000000007; };
+		E10F00000000000000000001 /* STACSource.swift in Sources */ = {isa = PBXBuildFile; fileRef = E10F00000000000000000000 /* STACSource.swift */; };
+		E10F00000000000000000003 /* KeychainService.swift in Sources */ = {isa = PBXBuildFile; fileRef = E10F00000000000000000002 /* KeychainService.swift */; };
+		E10F00000000000000000005 /* SourceBenchmark.swift in Sources */ = {isa = PBXBuildFile; fileRef = E10F00000000000000000004 /* SourceBenchmark.swift */; };
+		E10F00000000000000000007 /* SourceProgress.swift in Sources */ = {isa = PBXBuildFile; fileRef = E10F00000000000000000006 /* SourceProgress.swift */; };
+		E10F00000000000000000009 /* SASTokenManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = E10F00000000000000000008 /* SASTokenManager.swift */; };
+		E10F0000000000000000000B /* SourceBenchmarkService.swift in Sources */ = {isa = PBXBuildFile; fileRef = E10F0000000000000000000A /* SourceBenchmarkService.swift */; };
+		F10F00000000000000000001 /* DataSourcesView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10F00000000000000000000 /* DataSourcesView.swift */; };
+		F10F00000000000000000003 /* SourceProgressView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10F00000000000000000002 /* SourceProgressView.swift */; };
+		F10F00000000000000000005 /* DoubleLogistic.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10F00000000000000000004 /* DoubleLogistic.swift */; };
+		AA0F00000000000000000002 /* PixelPhenology.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0F00000000000000000001 /* PixelPhenology.swift */; };
+		AA0F00000000000000000004 /* PixelPhenologyFitter.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0F00000000000000000003 /* PixelPhenologyFitter.swift */; };
+		AA0F00000000000000000006 /* PixelDetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0F00000000000000000005 /* PixelDetailView.swift */; };
+		BB0F00000000000000000002 /* ClusterView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0F00000000000000000001 /* ClusterView.swift */; };
+		BB0F00000000000000000004 /* SelectionAnalysisView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0F00000000000000000003 /* SelectionAnalysisView.swift */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+		B10001 /* eofApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = eofApp.swift; sourceTree = "<group>"; };
+		B10002 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
+		B10003 /* NDVIMapView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NDVIMapView.swift; sourceTree = "<group>"; };
+		B10004 /* GeoJSON.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GeoJSON.swift; sourceTree = "<group>"; };
+		B10005 /* STACModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = STACModels.swift; sourceTree = "<group>"; };
+		B10006 /* UTMProjection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UTMProjection.swift; sourceTree = "<group>"; };
+		B10007 /* NDVIFrame.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NDVIFrame.swift; sourceTree = "<group>"; };
+		B10008 /* STACService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = STACService.swift; sourceTree = "<group>"; };
+		B10009 /* COGReader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = COGReader.swift; sourceTree = "<group>"; };
+		B10010 /* NDVIProcessor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NDVIProcessor.swift; sourceTree = "<group>"; };
+		B10011 /* SF_field.geojson */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = SF_field.geojson; sourceTree = "<group>"; };
+		B10012 /* ActivityLog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ActivityLog.swift; sourceTree = "<group>"; };
+		D10F000000000000000001 /* AppSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppSettings.swift; sourceTree = "<group>"; };
+		D10F000000000000000003 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
+		P10001 /* eof.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = eof.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		D10F000000000000000005 /* AOIGeometry.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AOIGeometry.swift; sourceTree = "<group>"; };
+		D10F000000000000000007 /* AOIView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AOIView.swift; sourceTree = "<group>"; };
+		E10F00000000000000000000 /* STACSource.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = STACSource.swift; sourceTree = "<group>"; };
+		E10F00000000000000000002 /* KeychainService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeychainService.swift; sourceTree = "<group>"; };
+		E10F00000000000000000004 /* SourceBenchmark.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SourceBenchmark.swift; sourceTree = "<group>"; };
+		E10F00000000000000000006 /* SourceProgress.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SourceProgress.swift; sourceTree = "<group>"; };
+		E10F00000000000000000008 /* SASTokenManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SASTokenManager.swift; sourceTree = "<group>"; };
+		E10F0000000000000000000A /* SourceBenchmarkService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SourceBenchmarkService.swift; sourceTree = "<group>"; };
+		F10F00000000000000000000 /* DataSourcesView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DataSourcesView.swift; sourceTree = "<group>"; };
+		F10F00000000000000000002 /* SourceProgressView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SourceProgressView.swift; sourceTree = "<group>"; };
+		F10F00000000000000000004 /* DoubleLogistic.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DoubleLogistic.swift; sourceTree = "<group>"; };
+		AA0F00000000000000000001 /* PixelPhenology.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PixelPhenology.swift; sourceTree = "<group>"; };
+		AA0F00000000000000000003 /* PixelPhenologyFitter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PixelPhenologyFitter.swift; sourceTree = "<group>"; };
+		AA0F00000000000000000005 /* PixelDetailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PixelDetailView.swift; sourceTree = "<group>"; };
+		BB0F00000000000000000001 /* ClusterView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClusterView.swift; sourceTree = "<group>"; };
+		BB0F00000000000000000003 /* SelectionAnalysisView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SelectionAnalysisView.swift; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		F10001 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		G10001 = {
+			isa = PBXGroup;
+			children = (
+				G10002 /* eof */,
+				G10006 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		G10002 /* eof */ = {
+			isa = PBXGroup;
+			children = (
+				B10001 /* eofApp.swift */,
+				G10003 /* Models */,
+				G10004 /* Services */,
+				G10005 /* Views */,
+				G10007 /* Resources */,
+			);
+			path = eof;
+			sourceTree = "<group>";
+		};
+		G10003 /* Models */ = {
+			isa = PBXGroup;
+			children = (
+				B10004 /* GeoJSON.swift */,
+				B10005 /* STACModels.swift */,
+				B10006 /* UTMProjection.swift */,
+				B10007 /* NDVIFrame.swift */,
+				B10012 /* ActivityLog.swift */,
+				D10F000000000000000001 /* AppSettings.swift */,
+				D10F000000000000000005 /* AOIGeometry.swift */,
+				E10F00000000000000000000 /* STACSource.swift */,
+				E10F00000000000000000004 /* SourceBenchmark.swift */,
+				E10F00000000000000000006 /* SourceProgress.swift */,
+				AA0F00000000000000000001 /* PixelPhenology.swift */,
+			);
+			path = Models;
+			sourceTree = "<group>";
+		};
+		G10004 /* Services */ = {
+			isa = PBXGroup;
+			children = (
+				B10008 /* STACService.swift */,
+				B10009 /* COGReader.swift */,
+				B10010 /* NDVIProcessor.swift */,
+				E10F00000000000000000002 /* KeychainService.swift */,
+				E10F00000000000000000008 /* SASTokenManager.swift */,
+				E10F0000000000000000000A /* SourceBenchmarkService.swift */,
+				F10F00000000000000000004 /* DoubleLogistic.swift */,
+				AA0F00000000000000000003 /* PixelPhenologyFitter.swift */,
+			);
+			path = Services;
+			sourceTree = "<group>";
+		};
+		G10005 /* Views */ = {
+			isa = PBXGroup;
+			children = (
+				B10002 /* ContentView.swift */,
+				B10003 /* NDVIMapView.swift */,
+				D10F000000000000000003 /* SettingsView.swift */,
+				D10F000000000000000007 /* AOIView.swift */,
+				F10F00000000000000000000 /* DataSourcesView.swift */,
+				F10F00000000000000000002 /* SourceProgressView.swift */,
+				AA0F00000000000000000005 /* PixelDetailView.swift */,
+				BB0F00000000000000000001 /* ClusterView.swift */,
+				BB0F00000000000000000003 /* SelectionAnalysisView.swift */,
+			);
+			path = Views;
+			sourceTree = "<group>";
+		};
+		G10006 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				P10001 /* eof.app */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		G10007 /* Resources */ = {
+			isa = PBXGroup;
+			children = (
+				B10011 /* SF_field.geojson */,
+			);
+			path = Resources;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		T10001 /* eof */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = C10003 /* Build configuration list for PBXNativeTarget "eof" */;
+			buildPhases = (
+				S10001 /* Sources */,
+				F10001 /* Frameworks */,
+				R10001 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = eof;
+			productName = eof;
+			productReference = P10001 /* eof.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		PR10001 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastSwiftUpdateCheck = 1540;
+				LastUpgradeCheck = 1540;
+				TargetAttributes = {
+					T10001 = {
+						CreatedOnToolsVersion = 15.4;
+					};
+				};
+			};
+			buildConfigurationList = C10001 /* Build configuration list for PBXProject "eof" */;
+			compatibilityVersion = "Xcode 14.0";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				Base,
+			);
+			mainGroup = G10001;
+			productRefGroup = G10006 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				T10001 /* eof */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		R10001 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A10011 /* SF_field.geojson in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		S10001 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A10001 /* eofApp.swift in Sources */,
+				A10002 /* ContentView.swift in Sources */,
+				A10003 /* NDVIMapView.swift in Sources */,
+				A10004 /* GeoJSON.swift in Sources */,
+				A10005 /* STACModels.swift in Sources */,
+				A10006 /* UTMProjection.swift in Sources */,
+				A10007 /* NDVIFrame.swift in Sources */,
+				A10008 /* STACService.swift in Sources */,
+				A10009 /* COGReader.swift in Sources */,
+				A10010 /* NDVIProcessor.swift in Sources */,
+				A10012 /* ActivityLog.swift in Sources */,
+				D10F000000000000000002 /* AppSettings.swift in Sources */,
+				D10F000000000000000004 /* SettingsView.swift in Sources */,
+				D10F000000000000000006 /* AOIGeometry.swift in Sources */,
+				D10F000000000000000008 /* AOIView.swift in Sources */,
+				E10F00000000000000000001 /* STACSource.swift in Sources */,
+				E10F00000000000000000003 /* KeychainService.swift in Sources */,
+				E10F00000000000000000005 /* SourceBenchmark.swift in Sources */,
+				E10F00000000000000000007 /* SourceProgress.swift in Sources */,
+				E10F00000000000000000009 /* SASTokenManager.swift in Sources */,
+				E10F0000000000000000000B /* SourceBenchmarkService.swift in Sources */,
+				F10F00000000000000000001 /* DataSourcesView.swift in Sources */,
+				F10F00000000000000000003 /* SourceProgressView.swift in Sources */,
+				F10F00000000000000000005 /* DoubleLogistic.swift in Sources */,
+				AA0F00000000000000000002 /* PixelPhenology.swift in Sources */,
+				AA0F00000000000000000004 /* PixelPhenologyFitter.swift in Sources */,
+				AA0F00000000000000000006 /* PixelDetailView.swift in Sources */,
+				BB0F00000000000000000002 /* ClusterView.swift in Sources */,
+				BB0F00000000000000000004 /* SelectionAnalysisView.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		C10D01 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"DEBUG=1",
+					"$(inherited)",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				SDKROOT = iphoneos;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+			};
+			name = Debug;
+		};
+		C10R01 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				SDKROOT = iphoneos;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				VALIDATE_PRODUCT = YES;
+			};
+			name = Release;
+		};
+		C10D02 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = 74SY6DZ377;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
+				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
+				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = uk.ac.ucl.eof;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_OBJC_BRIDGING_HEADER = "eof/eof-Bridging-Header.h";
+				SWIFT_STRICT_CONCURRENCY = complete;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		C10R02 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = 74SY6DZ377;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
+				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
+				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = uk.ac.ucl.eof;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_STRICT_CONCURRENCY = complete;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		C10001 /* Build configuration list for PBXProject "eof" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				C10D01 /* Debug */,
+				C10R01 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		C10003 /* Build configuration list for PBXNativeTarget "eof" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				C10D02 /* Debug */,
+				C10R02 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = PR10001 /* Project object */;
+}
