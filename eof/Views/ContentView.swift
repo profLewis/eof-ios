@@ -1375,13 +1375,8 @@ struct ContentView: View {
         let c = geometry.centroid
         log.info("Centroid: \(String(format: "%.4f", c.lon))E, \(String(format: "%.4f", c.lat))N")
 
-        // Apply buffer if configured
-        let fetchGeometry: GeoJSONGeometry
         if settings.aoiBufferMeters > 0 {
-            fetchGeometry = geometry.buffered(meters: settings.aoiBufferMeters)
-            log.info("AOI buffered by \(Int(settings.aoiBufferMeters))m for fetch")
-        } else {
-            fetchGeometry = geometry
+            log.info("AOI buffer: \(Int(settings.aoiBufferMeters))m (chip expanded, polygon unchanged)")
         }
 
         lastStartDate = settings.startDateString
@@ -1393,7 +1388,7 @@ struct ContentView: View {
 
         Task {
             await processor.fetch(
-                geometry: fetchGeometry,
+                geometry: geometry,
                 startDate: settings.startDateString,
                 endDate: settings.endDateString
             )
