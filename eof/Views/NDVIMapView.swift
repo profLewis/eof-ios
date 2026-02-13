@@ -119,6 +119,18 @@ struct NDVIMapView: View {
             case .scl:
                 guard let p = renderSCLPixels() else { return nil }
                 pixels = p
+            case .bandRed:
+                guard let p = renderBandPixels(band: frame.redBand) else { return nil }
+                pixels = p
+            case .bandNIR:
+                guard let p = renderBandPixels(band: frame.nirBand) else { return nil }
+                pixels = p
+            case .bandGreen:
+                guard let p = renderBandPixels(band: frame.greenBand) else { return nil }
+                pixels = p
+            case .bandBlue:
+                guard let p = renderBandPixels(band: frame.blueBand) else { return nil }
+                pixels = p
             }
         }
 
@@ -468,6 +480,28 @@ struct NDVIMapView: View {
         case 11: return (255, 150, 255)    // Snow / Ice
         default: return (0, 0, 0)
         }
+    }
+
+    /// Render a single band as greyscale.
+    private func renderBandPixels(band: [[UInt16]]?) -> [UInt32]? {
+        let width = frame.width
+        let height = frame.height
+        guard width > 0 && height > 0 else { return nil }
+        guard let band = band else { return renderNDVIPixels() }  // fallback
+
+        var pixels = [UInt32](repeating: 0, count: width * height)
+        for row in 0..<height {
+            for col in 0..<width {
+                if cloudMask && isInvalid(row: row, col: col) {
+                    pixels[row * width + col] = maskedPixelColor(row: row, col: col)
+                    continue
+                }
+                guard row < band.count, col < band[row].count else { continue }
+                let g = dnToDisplay(band[row][col])
+                pixels[row * width + col] = packRGBA(r: g, g: g, b: g, a: 255)
+            }
+        }
+        return pixels
     }
 
     /// Convert S2 L2A DN to display byte (0-255) with stretch.

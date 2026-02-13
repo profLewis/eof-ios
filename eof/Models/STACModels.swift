@@ -34,12 +34,24 @@ struct STACItem: Codable {
         return fmt.date(from: String(s.prefix(19)))
     }
 
-    /// Extract MGRS tile ID from item ID (e.g. "S2B_35JPM_20220801_0_L2A" -> "35JPM")
+    /// Extract MGRS tile ID from item ID.
+    /// AWS:  "S2B_35JPM_20220801_0_L2A"                          → parts[1] = "35JPM"
+    /// PC:   "S2B_MSIL2A_20220801T093559_R136_T35JPM_20220801…"  → "T35JPM" prefix
+    /// HLS:  "HLS.S30.T35JPM.2022201T093559.v2.0"                → dot-split "T35JPM"
     var mgrsTile: String? {
+        // Try dot-separated format first (HLS)
+        let dotParts = id.split(separator: ".")
+        for part in dotParts {
+            let s = String(part)
+            if s.count == 6 && s.hasPrefix("T") { return String(s.dropFirst()) }
+        }
+        // Underscore-separated (AWS / PC)
         let parts = id.split(separator: "_")
-        guard parts.count >= 2 else { return nil }
-        let candidate = String(parts[1])
-        if candidate.count == 5 { return candidate }
+        for part in parts {
+            let s = String(part)
+            if s.count == 5 && s.first?.isNumber == true { return s }           // "35JPM"
+            if s.count == 6 && s.hasPrefix("T") { return String(s.dropFirst()) } // "T35JPM"
+        }
         return nil
     }
 

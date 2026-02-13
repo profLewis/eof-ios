@@ -13,6 +13,10 @@ class AppSettings {
         case fcc = "False Color (NIR-R-G)"
         case rcc = "True Color (R-G-B)"
         case scl = "Scene Classification"
+        case bandRed = "Red (B04)"
+        case bandNIR = "NIR (B08)"
+        case bandGreen = "Green (B03)"
+        case bandBlue = "Blue (B02)"
     }
 
     enum AOISource: Equatable {
@@ -29,6 +33,19 @@ class AppSettings {
         case square = "Square"
     }
 
+    enum VegetationIndex: String, CaseIterable {
+        case ndvi = "NDVI"
+        case dvi = "DVI"
+
+        var label: String { rawValue }
+        var description: String {
+            switch self {
+            case .ndvi: return "(NIR \u{2212} Red) / (NIR + Red)"
+            case .dvi: return "NIR \u{2212} Red"
+            }
+        }
+    }
+
     var displayMode: DisplayMode = .fcc { didSet { save() } }
     var cloudMask: Bool = true { didSet { save() } }
     var cloudThreshold: Double = 100 { didSet { save() } }
@@ -41,6 +58,7 @@ class AppSettings {
     var enforceAOI: Bool = true { didSet { save() } }
     var showMaskedClassColors: Bool = false { didSet { save() } }
     var showBasemap: Bool = true { didSet { save() } }
+    var vegetationIndex: VegetationIndex = .dvi { didSet { save() } }
 
     // Per-pixel phenology settings
     var pixelEnsembleRuns: Int = 5 { didSet { save() } }
@@ -176,6 +194,7 @@ class AppSettings {
         defaults.set(clusterFilterThreshold, forKey: prefix + "clusterFilterThreshold")
         defaults.set(minSeasonLength, forKey: prefix + "minSeasonLength")
         defaults.set(maxSeasonLength, forKey: prefix + "maxSeasonLength")
+        defaults.set(vegetationIndex.rawValue, forKey: prefix + "vegetationIndex")
     }
 
     private func load() {
@@ -226,6 +245,10 @@ class AppSettings {
         if msl > 0 { minSeasonLength = msl }
         let mxl = defaults.integer(forKey: prefix + "maxSeasonLength")
         if mxl > 0 { maxSeasonLength = mxl }
+        if let viRaw = defaults.string(forKey: prefix + "vegetationIndex"),
+           let vi = VegetationIndex(rawValue: viRaw) {
+            vegetationIndex = vi
+        }
     }
 
     var startDateString: String {

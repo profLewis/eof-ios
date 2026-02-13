@@ -22,6 +22,14 @@ struct SettingsView: View {
                     }
                     .pickerStyle(.segmented)
 
+                    Picker("Band", selection: $settings.displayMode) {
+                        Text("Red").tag(AppSettings.DisplayMode.bandRed)
+                        Text("NIR").tag(AppSettings.DisplayMode.bandNIR)
+                        Text("Green").tag(AppSettings.DisplayMode.bandGreen)
+                        Text("Blue").tag(AppSettings.DisplayMode.bandBlue)
+                    }
+                    .pickerStyle(.segmented)
+
                     Text(displayModeDescription)
                         .font(.caption)
                         .foregroundStyle(.secondary)
@@ -95,6 +103,21 @@ struct SettingsView: View {
                 Section("Date Range") {
                     DatePicker("Start", selection: $settings.startDate, displayedComponents: .date)
                     DatePicker("End", selection: $settings.endDate, displayedComponents: .date)
+                }
+
+                Section("Vegetation Index") {
+                    Picker("Fitting VI", selection: $settings.vegetationIndex) {
+                        ForEach(AppSettings.VegetationIndex.allCases, id: \.self) { vi in
+                            Text(vi.label).tag(vi)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    Text(settings.vegetationIndex.description)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Text("DVI averages linearly across pixel sizes. NDVI is normalized but non-linear.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
 
                 Section("Filters") {
@@ -251,6 +274,14 @@ struct SettingsView: View {
                     Text("B02, B03, B04")
                 case .scl:
                     Text("SCL (20m)")
+                case .bandRed:
+                    Text("B04 (Red, 665nm)")
+                case .bandNIR:
+                    Text("B08 (NIR, 842nm)")
+                case .bandGreen:
+                    Text("B03 (Green, 560nm)")
+                case .bandBlue:
+                    Text("B02 (Blue, 490nm)")
                 }
             }
             .font(.caption)
@@ -268,6 +299,14 @@ struct SettingsView: View {
             "True Color: Red, Green, Blue bands. Natural appearance."
         case .scl:
             "Scene Classification Layer: per-pixel land cover and cloud classification."
+        case .bandRed:
+            "Red band (B04, 665nm). Greyscale reflectance."
+        case .bandNIR:
+            "NIR band (B08, 842nm). Greyscale reflectance. Bright = high vegetation/soil reflectance."
+        case .bandGreen:
+            "Green band (B03, 560nm). Greyscale reflectance."
+        case .bandBlue:
+            "Blue band (B02, 490nm). Greyscale reflectance."
         }
     }
 }

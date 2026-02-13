@@ -339,30 +339,32 @@ struct ContentView: View {
                     }
                     let currentRejectionMap: [[Float]]? = showBadData ? pixelPhenology?.rejectionReasonMap() : nil
 
-                    NDVIMapView(frame: frame, showPolygon: true, showColorBar: true,
-                                displayMode: settings.displayMode,
-                                cloudMask: settings.cloudMask,
-                                ndviThreshold: settings.ndviThreshold,
-                                sclValidClasses: settings.sclValidClasses,
-                                showSCLBoundaries: phenologyDisplayParam == nil && !showBadData && settings.showSCLBoundaries,
-                                enforceAOI: settings.enforceAOI,
-                                showMaskedClassColors: settings.showMaskedClassColors,
-                                basemapImage: settings.showBasemap ? basemapImage : nil,
-                                phenologyMap: showData && !showBadData ? currentPhenoMap : nil,
-                                phenologyParam: showData && !showBadData ? phenologyDisplayParam : nil,
-                                rejectionMap: showData ? currentRejectionMap : nil)
-                        .clipShape(RoundedRectangle(cornerRadius: 8))
-                        .shadow(radius: 2)
-                        .opacity(showData ? 1.0 : 0.0)
-                        .background {
-                            if !showData, let bm = basemapImage {
-                                let imgW = CGFloat(frame.width) * 8
-                                Image(decorative: bm, scale: CGFloat(bm.width) / imgW)
-                                    .interpolation(.high)
-                                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                    GeometryReader { geo in
+                        let fitScale = max(1, min(8, geo.size.width / CGFloat(frame.width)))
+                        NDVIMapView(frame: frame, scale: fitScale, showPolygon: true, showColorBar: true,
+                                    displayMode: settings.displayMode,
+                                    cloudMask: settings.cloudMask,
+                                    ndviThreshold: settings.ndviThreshold,
+                                    sclValidClasses: settings.sclValidClasses,
+                                    showSCLBoundaries: phenologyDisplayParam == nil && !showBadData && settings.showSCLBoundaries,
+                                    enforceAOI: settings.enforceAOI,
+                                    showMaskedClassColors: settings.showMaskedClassColors,
+                                    basemapImage: settings.showBasemap ? basemapImage : nil,
+                                    phenologyMap: showData && !showBadData ? currentPhenoMap : nil,
+                                    phenologyParam: showData && !showBadData ? phenologyDisplayParam : nil,
+                                    rejectionMap: showData ? currentRejectionMap : nil)
+                            .clipShape(RoundedRectangle(cornerRadius: 8))
+                            .shadow(radius: 2)
+                            .opacity(showData ? 1.0 : 0.0)
+                            .background {
+                                if !showData, let bm = basemapImage {
+                                    let imgW = CGFloat(frame.width) * fitScale
+                                    Image(decorative: bm, scale: CGFloat(bm.width) / imgW)
+                                        .interpolation(.high)
+                                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                                }
                             }
-                        }
-                        .scaleEffect(imageZoomScale)
+                            .scaleEffect(imageZoomScale)
                         .gesture(
                             MagnifyGesture()
                                 .onChanged { value in
@@ -383,10 +385,8 @@ struct ContentView: View {
                         .onTapGesture { location in
                             if showBadData, let pp = pixelPhenology {
                                 // Tap-to-inspect bad pixel
-                                let imgW = CGFloat(frame.width) * 8
-                                let imgH = CGFloat(frame.height) * 8
-                                let col = Int(location.x / imgW * CGFloat(frame.width))
-                                let row = Int(location.y / imgH * CGFloat(frame.height))
+                                let col = Int(location.x / fitScale)
+                                let row = Int(location.y / fitScale)
                                 if row >= 0, row < pp.height, col >= 0, col < pp.width,
                                    let px = pp.pixels[row][col] {
                                     tappedPixelDetail = px
@@ -419,7 +419,7 @@ struct ContentView: View {
                                 }
                                 .onEnded { _ in
                                     if isSelectMode {
-                                        finalizeSelection(frame: frame)
+                                        finalizeSelection(frame: frame, scale: fitScale)
                                     } else {
                                         dragStartIndex = currentFrameIndex
                                     }
@@ -493,6 +493,8 @@ struct ContentView: View {
                         }
                         .onAppear { dragStartIndex = currentFrameIndex }
                         .onChange(of: currentFrameIndex) { dragStartIndex = currentFrameIndex }
+                    }
+                    .frame(height: CGFloat(frame.height) * min(8, UIScreen.main.bounds.width / CGFloat(frame.width)) + 30)
 
                     HStack {
                         Text("Cloud: \(Int(frame.cloudFraction * 100))%")
@@ -1500,9 +1502,8 @@ struct ContentView: View {
         }
     }
 
-    private func finalizeSelection(frame: NDVIFrame) {
+    private func finalizeSelection(frame: NDVIFrame, scale: CGFloat = 8) {
         guard let s = selectionStart, let e = selectionEnd else { return }
-        let scale: CGFloat = 8  // pixel render scale
         let minCol = max(0, Int(min(s.x, e.x) / scale))
         let maxCol = min(frame.width - 1, Int(max(s.x, e.x) / scale))
         let minRow = max(0, Int(min(s.y, e.y) / scale))

@@ -249,11 +249,14 @@ class NDVIProcessor {
 
             func pickBestSource(from candidates: [(STACItem, STACSourceConfig)]) -> (STACItem, STACSourceConfig) {
                 guard candidates.count > 1 else { return candidates[0] }
-                return candidates.min(by: { a, b in
-                    let aScore = avgLatency(a.1.sourceID) + Double(sourceInFlight[a.1.sourceID] ?? 0) * 0.5
-                    let bScore = avgLatency(b.1.sourceID) + Double(sourceInFlight[b.1.sourceID] ?? 0) * 0.5
-                    return aScore < bScore
-                })!
+                // Score each candidate; pick randomly among those within 20% of the best
+                let scored = candidates.map { c in
+                    (c, avgLatency(c.1.sourceID) + Double(sourceInFlight[c.1.sourceID] ?? 0) * 0.5)
+                }
+                let bestScore = scored.map(\.1).min()!
+                let threshold = bestScore * 1.2 + 0.1  // 20% tolerance + small absolute margin
+                let eligible = scored.filter { $0.1 <= threshold }.map(\.0)
+                return eligible.randomElement()!
             }
 
             await withTaskGroup(of: ProcessResult.self) { group in
@@ -751,10 +754,10 @@ class NDVIProcessor {
             let mode = settings.displayMode
             var green: [[UInt16]]?
             var blue: [[UInt16]]?
-            if mode == .fcc || mode == .rcc, let gURL = greenURL {
+            if mode == .fcc || mode == .rcc || mode == .bandGreen, let gURL = greenURL {
                 green = try? await cogReader.readRegion(url: gURL, pixelBounds: pixelBounds, authHeaders: authHeaders)
             }
-            if mode == .rcc, let bURL = blueURL {
+            if mode == .rcc || mode == .bandBlue, let bURL = blueURL {
                 blue = try? await cogReader.readRegion(url: bURL, pixelBounds: pixelBounds, authHeaders: authHeaders)
             }
 
@@ -835,7 +838,8 @@ class NDVIProcessor {
                 polyPixels.append((col: pixCol, row: pixRow))
             }
 
-            // Compute NDVI — only SCL mask applied (no DN/reflectance filtering)
+            // Compute VI — only SCL mask applied (no DN/reflectance filtering)
+            let viMode = settings.vegetationIndex
             var ndvi = [[Float]](repeating: [Float](repeating: .nan, count: width), count: height)
             var validCount = 0
             var validValues = [Float]()
@@ -859,14 +863,19 @@ class NDVIProcessor {
                     let redRefl = (redDN + baselineOffset) / quantificationValue
                     let nirRefl = (nirDN + baselineOffset) / quantificationValue
 
-                    // Compute NDVI (allow all values including negative)
-                    let sum = nirRefl + redRefl
-                    if sum != 0 {
-                        let val = (nirRefl - redRefl) / sum
-                        ndvi[row][col] = min(1, max(-1, val))
-                        validValues.append(ndvi[row][col])
-                        validCount += 1
+                    // Compute selected vegetation index
+                    let val: Float
+                    switch viMode {
+                    case .ndvi:
+                        let sum = nirRefl + redRefl
+                        guard sum != 0 else { continue }
+                        val = min(1, max(-1, (nirRefl - redRefl) / sum))
+                    case .dvi:
+                        val = nirRefl - redRefl
                     }
+                    ndvi[row][col] = val
+                    validValues.append(val)
+                    validCount += 1
                 }
             }
 
@@ -885,7 +894,7 @@ class NDVIProcessor {
                 return nil
             }
 
-            log.success("\(dateStr) [\(srcName)]: \(validCount)/\(polyPixelCount) valid, median=\(String(format: "%.3f", medianNDVI)), cloud=\(Int(cloudPercent))%")
+            log.success("\(dateStr) [\(srcName)]: \(validCount)/\(polyPixelCount) valid, median \(viMode.rawValue)=\(String(format: "%.3f", medianNDVI)), cloud=\(Int(cloudPercent))%")
 
             let date = item.date ?? Date()
 
@@ -933,8 +942,8 @@ class NDVIProcessor {
             let frame = frames[i]
             guard let bounds = frame.pixelBounds else { continue }
 
-            // FCC needs green
-            if (mode == .fcc || mode == .rcc) && frame.greenBand == nil,
+            // FCC/RCC/bandGreen needs green
+            if (mode == .fcc || mode == .rcc || mode == .bandGreen) && frame.greenBand == nil,
                let url = frame.greenURL {
                 if let data = try? await cogReader.readRegion(url: url, pixelBounds: bounds) {
                     frames[i].greenBand = data
@@ -942,8 +951,8 @@ class NDVIProcessor {
                 }
             }
 
-            // RCC needs blue
-            if mode == .rcc && frame.blueBand == nil,
+            // RCC/bandBlue needs blue
+            if (mode == .rcc || mode == .bandBlue) && frame.blueBand == nil,
                let url = frame.blueURL {
                 if let data = try? await cogReader.readRegion(url: url, pixelBounds: bounds) {
                     frames[i].blueBand = data
@@ -954,9 +963,9 @@ class NDVIProcessor {
 
         if updated {
             let bandNames = switch mode {
-            case .ndvi: "Red, NIR"
-            case .fcc: "Red, NIR, Green"
-            case .rcc: "Red, Green, Blue"
+            case .ndvi, .bandRed, .bandNIR: "Red, NIR"
+            case .fcc, .bandGreen: "Red, NIR, Green"
+            case .rcc, .bandBlue: "Red, Green, Blue"
             case .scl: "SCL"
             }
             log.success("Loaded additional bands for \(mode.rawValue) (\(bandNames))")
