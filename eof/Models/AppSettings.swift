@@ -58,7 +58,7 @@ class AppSettings {
     var enforceAOI: Bool = true { didSet { save() } }
     var showMaskedClassColors: Bool = false { didSet { save() } }
     var showBasemap: Bool = true { didSet { save() } }
-    var vegetationIndex: VegetationIndex = .dvi { didSet { save() } }
+    var vegetationIndex: VegetationIndex = .ndvi { didSet { save() } }
 
     // Per-pixel phenology settings
     var pixelEnsembleRuns: Int = 5 { didSet { save() } }
