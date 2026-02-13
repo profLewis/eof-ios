@@ -9,6 +9,9 @@ struct DataSourcesView: View {
     @State private var cdsePassword: String = KeychainService.retrieve(key: "cdse.password") ?? ""
     @State private var earthdataUsername: String = KeychainService.retrieve(key: "earthdata.username") ?? ""
     @State private var earthdataPassword: String = KeychainService.retrieve(key: "earthdata.password") ?? ""
+    @State private var pcTokenStatus: String?
+    @State private var pcTokenOK: Bool = false
+    @State private var isFetchingPCToken = false
 
     var body: some View {
         NavigationStack {
@@ -72,7 +75,24 @@ struct DataSourcesView: View {
                                 try? KeychainService.store(key: "planetary.apikey", value: pcAPIKey)
                             }
                         }
-                    Text("Optional. Works without an API key but rate limits may apply.")
+                    Button {
+                        fetchPCToken()
+                    } label: {
+                        HStack {
+                            Label("Get SAS Token", systemImage: "key.fill")
+                            if isFetchingPCToken {
+                                Spacer()
+                                ProgressView()
+                            }
+                        }
+                    }
+                    .disabled(isFetchingPCToken)
+                    if let status = pcTokenStatus {
+                        Label(status, systemImage: pcTokenOK ? "checkmark.circle.fill" : "xmark.circle.fill")
+                            .font(.caption)
+                            .foregroundStyle(pcTokenOK ? .green : .red)
+                    }
+                    Text("No API key needed. Token is fetched automatically and lasts ~1 hour.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -214,6 +234,38 @@ struct DataSourcesView: View {
             KeychainService.delete(key: key)
         } else {
             try? KeychainService.store(key: key, value: value)
+        }
+    }
+
+    private func fetchPCToken() {
+        isFetchingPCToken = true
+        pcTokenStatus = nil
+        Task {
+            do {
+                let sas = SASTokenManager()
+                let token = try await sas.getToken()
+                // Parse expiry from token query: se=2026-02-13T23%3A12%3A41Z
+                var expiry = ""
+                for param in token.components(separatedBy: "&") {
+                    if param.hasPrefix("se=") {
+                        expiry = param.dropFirst(3)
+                            .removingPercentEncoding ?? String(param.dropFirst(3))
+                    }
+                }
+                await MainActor.run {
+                    pcTokenOK = true
+                    pcTokenStatus = expiry.isEmpty
+                        ? "Token OK (\(token.count) chars)"
+                        : "Token OK, expires \(expiry)"
+                    isFetchingPCToken = false
+                }
+            } catch {
+                await MainActor.run {
+                    pcTokenOK = false
+                    pcTokenStatus = error.localizedDescription
+                    isFetchingPCToken = false
+                }
+            }
         }
     }
 
