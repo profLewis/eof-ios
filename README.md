@@ -17,7 +17,6 @@
 - Long-press any pixel to inspect its individual NDVI time series, DL fit curve, reflectance data, and SCL history
 - Satellite basemap underneath imagery (Apple Maps)
 - Multi-source redundancy with automatic HTTP error fallback between AWS and Planetary Computer
-- Disk caching for instant reload
 - Configurable: date range, AOI (GeoJSON polygon, URL, or manual lat/lon), cloud threshold, SCL class filtering, concurrency
 
 ## Getting It On Your iPhone

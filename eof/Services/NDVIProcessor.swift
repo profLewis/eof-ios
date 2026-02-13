@@ -434,7 +434,7 @@ class NDVIProcessor {
                         log.info("Peak median NDVI: \(String(format: "%.3f", peak))")
                     }
                 }
-                saveCacheToDisk()
+
             }
 
         } catch {
@@ -1012,58 +1012,4 @@ class NDVIProcessor {
         return inside
     }
 
-    // MARK: - Disk Cache
-
-    private static let cacheFile = "eof_frame_cache.json"
-
-    private static var cacheURL: URL {
-        let dir = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first!
-        return dir.appendingPathComponent(cacheFile)
-    }
-
-    /// Save current frames to disk cache.
-    func saveCacheToDisk() {
-        guard !frames.isEmpty else { return }
-        do {
-            let data = try JSONEncoder().encode(frames)
-            try data.write(to: Self.cacheURL, options: .atomic)
-            log.info("Cached \(frames.count) frames to disk (\(ByteCountFormatter.string(fromByteCount: Int64(data.count), countStyle: .file)))")
-        } catch {
-            log.warn("Failed to save cache: \(error.localizedDescription)")
-        }
-    }
-
-    /// Load frames from disk cache. Returns true if cache was loaded.
-    @MainActor
-    func loadCacheFromDisk() -> Bool {
-        let url = Self.cacheURL
-        guard FileManager.default.fileExists(atPath: url.path) else { return false }
-        do {
-            let data = try Data(contentsOf: url)
-            let cached = try JSONDecoder().decode([NDVIFrame].self, from: data)
-            guard !cached.isEmpty else { return false }
-            frames = cached
-            status = .done
-            progress = 1.0
-            progressMessage = "Loaded \(cached.count) cached frames"
-            log.success("Loaded \(cached.count) frames from disk cache")
-            return true
-        } catch {
-            log.warn("Cache load failed: \(error.localizedDescription)")
-            return false
-        }
-    }
-
-    /// Delete the disk cache.
-    static func clearDiskCache() {
-        try? FileManager.default.removeItem(at: cacheURL)
-    }
-
-    /// Size of disk cache in bytes (0 if none).
-    static var diskCacheSize: Int64 {
-        let url = cacheURL
-        guard let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
-              let size = attrs[.size] as? Int64 else { return 0 }
-        return size
-    }
 }

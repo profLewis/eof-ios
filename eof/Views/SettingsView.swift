@@ -9,7 +9,6 @@ struct SettingsView: View {
     @State private var showingAOI = false
     @State private var showingDataSources = false
     @State private var showingSCLMask = false
-    @State private var cacheSize: Int64 = NDVIProcessor.diskCacheSize
 
     var body: some View {
         NavigationStack {
@@ -191,28 +190,6 @@ struct SettingsView: View {
                                 .foregroundStyle(.secondary)
                         }
                     }
-                }
-
-                Section {
-                    Button {
-                        NDVIProcessor.clearDiskCache()
-                        cacheSize = 0
-                    } label: {
-                        HStack {
-                            Label("Clear Data Cache", systemImage: "trash")
-                            Spacer()
-                            if cacheSize > 0 {
-                                Text(ByteCountFormatter.string(fromByteCount: cacheSize, countStyle: .file))
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                            } else {
-                                Text("Empty")
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                            }
-                        }
-                    }
-                    .tint(.red)
                 }
 
                 Section {

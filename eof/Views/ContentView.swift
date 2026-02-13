@@ -1314,12 +1314,6 @@ struct ContentView: View {
         lastCloudMask = settings.cloudMask
         lastEnforceAOI = settings.enforceAOI
 
-        // Try disk cache first
-        if processor.loadCacheFromDisk() {
-            log.info("Using cached data — tap redo to re-fetch from servers")
-            return
-        }
-
         Task {
             await processor.fetch(
                 geometry: geometry,
@@ -1332,7 +1326,6 @@ struct ContentView: View {
     private func resetAndFetch() {
         stopPlayback()
         currentFrameIndex = 0
-        NDVIProcessor.clearDiskCache()  // force re-download
         processor.status = .idle
         processor.frames = []
         processor.progress = 0
