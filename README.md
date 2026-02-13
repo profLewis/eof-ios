@@ -144,7 +144,6 @@ eof-ios/
     Views/
       ContentView.swift          — main UI: movie, chart, phenology controls, gestures
       NDVIMapView.swift          — pixel renderer (NDVI, FCC, RCC, SCL, phenology maps)
-      PixelDetailView.swift      — per-pixel inspection (NDVI, reflectance, SCL)
       SelectionAnalysisView.swift — sub-AOI rectangle analysis
       ClusterView.swift          — cluster analysis visualisation (pie, histograms, IQR)
       SettingsView.swift         — settings, S2 band reference, SCL mask config
@@ -159,10 +158,10 @@ eof-ios/
 
 | Source | API | Auth | Bands |
 |--------|-----|------|-------|
-| AWS Earth Search | `earth-search.aws.element84.com/v1` | None | B04 (Red), B08 (NIR), B03 (Green), B02 (Blue), SCL |
-| Planetary Computer | `planetarycomputer.microsoft.com/api/stac/v1` | SAS token (auto) | B04, B08, B03, B02, SCL |
+| Planetary Computer (default) | `planetarycomputer.microsoft.com/api/stac/v1` | SAS token (auto) | B04 (Red), B08 (NIR), B03 (Green), B02 (Blue), SCL |
+| AWS Earth Search | `earth-search.aws.element84.com/v1` | None | B04, B08, B03, B02, SCL |
 
-The app probes both sources at startup, round-robin allocates scenes, and automatically retries from the alternate source on HTTP errors.
+The app probes both sources at startup, allocates scenes weighted by benchmark speed (when Smart Stream Allocation is enabled), and automatically retries from the alternate source on HTTP errors.
 
 ## Phenology Model
 
@@ -242,16 +241,6 @@ A rectangle selection tool allows inspection of a sub-region of the AOI:
 2. Drag a rectangle over the area of interest
 3. The app computes mean NDVI time series, DL fit, mean reflectance spectra (Red, NIR, Green, Blue), and phenology parameter statistics (mean ± std) for the selected pixels
 4. Good/poor/outlier pixel counts are shown in the header
-
-## Per-Pixel Inspection
-
-Long-press on any pixel in the map to open a detail sheet showing:
-
-- **NDVI time series** — scatter plot of this pixel's NDVI across all dates, with points colour-coded (green = used in fit, red crosses = filtered by cycle contamination)
-- **DL fit curves** — pixel's own fit (yellow) and field median fit (green dashed) for comparison
-- **Parameter comparison** — side-by-side table of pixel vs median DL parameters
-- **Reflectance time series** — Red, NIR, Green, Blue reflectance (DN/10000) across all dates
-- **SCL history** — colour-coded strip showing the Scene Classification class for each date
 
 ## Related Projects
 

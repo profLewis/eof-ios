@@ -70,7 +70,7 @@ class AppSettings {
     ]
 
     // Data Sources (order = trust priority)
-    var sources: [STACSourceConfig] = [.awsDefault(), .planetaryDefault()]
+    var sources: [STACSourceConfig] = [.planetaryDefault(), .awsDefault()]
     var benchmarkResults: [SourceBenchmark] = []
     var smartAllocation: Bool = true
 

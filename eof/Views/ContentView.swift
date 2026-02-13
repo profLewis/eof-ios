@@ -30,8 +30,6 @@ struct ContentView: View {
     @State private var pixelFitProgress: Double = 0
     @State private var isRunningPixelFit = false
     @State private var phenologyDisplayParam: PhenologyParameter?
-    @State private var selectedPixel: (row: Int, col: Int)?
-    @State private var showingPixelDetail = false
     @State private var showingClusterView = false
     @State private var showData = true
     // Cluster filter
@@ -181,19 +179,6 @@ struct ContentView: View {
             .sheet(isPresented: $showingSettings) {
                 SettingsView(isPresented: $showingSettings)
                     .presentationDetents([.large])
-            }
-            .sheet(isPresented: $showingPixelDetail) {
-                if let px = selectedPixel {
-                    let pixFit = pixelPhenology?.pixels[px.row][px.col]
-                    PixelDetailView(
-                        isPresented: $showingPixelDetail,
-                        row: px.row, col: px.col,
-                        frames: processor.frames,
-                        pixelFit: pixFit,
-                        medianFit: dlBest
-                    )
-                    .presentationDetents([.large])
-                }
             }
             .sheet(isPresented: $showingClusterView) {
                 if let pp = pixelPhenology {
@@ -396,22 +381,6 @@ struct ContentView: View {
                                         finalizeSelection(frame: frame)
                                     } else {
                                         dragStartIndex = currentFrameIndex
-                                    }
-                                }
-                        )
-                        .simultaneousGesture(
-                            LongPressGesture(minimumDuration: 0.5)
-                                .sequenced(before: DragGesture(minimumDistance: 0))
-                                .onEnded { value in
-                                    guard !isSelectMode else { return }
-                                    if case .second(true, let drag?) = value {
-                                        let location = drag.location
-                                        let pixelX = Int(location.x / 8)
-                                        let pixelY = Int(location.y / 8)
-                                        if pixelX >= 0 && pixelX < frame.width && pixelY >= 0 && pixelY < frame.height {
-                                            selectedPixel = (row: pixelY, col: pixelX)
-                                            showingPixelDetail = true
-                                        }
                                     }
                                 }
                         )
