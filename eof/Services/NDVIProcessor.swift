@@ -154,14 +154,7 @@ class NDVIProcessor {
                 }
             }
 
-            // Deduplicate by (dateString, mgrsTile), then distribute across sources round-robin
-            struct TaggedItem {
-                let item: STACItem
-                let config: STACSourceConfig
-                let key: String  // dedup key for fallback lookup
-            }
-
-            // Build a lookup: for each unique date/tile key, collect available (item, config) pairs
+            // Deduplicate by (dateString, mgrsTile), collect available sources per scene
             var candidatesByKey = [String: [(STACItem, STACSourceConfig)]]()
             var orderedKeys = [String]()
             for src in enabledSources {
@@ -178,87 +171,21 @@ class NDVIProcessor {
                 }
             }
 
-            // Assign scenes to sources — weighted by benchmark speed if available
-            var taggedItems = [TaggedItem]()
-            var sourceAssignCounts = [SourceID: Int]()
-
-            // Compute target allocation weights from benchmarks (faster = more scenes)
-            let benchmarks = settings.benchmarkResults
-            let useWeighted = settings.smartAllocation && !benchmarks.isEmpty
-            var sourceWeights = [SourceID: Double]()
-            if useWeighted {
-                let streamAlloc = SourceBenchmarkService.allocateStreams(
-                    benchmarks: benchmarks, totalStreams: orderedKeys.count
-                )
-                let totalAlloc = Double(streamAlloc.values.reduce(0, +))
-                for (sid, count) in streamAlloc {
-                    sourceWeights[sid] = totalAlloc > 0 ? Double(count) / totalAlloc : 0
-                }
-                log.info("Weighted allocation: \(streamAlloc.map { "\($0.key.rawValue): \($0.value)" }.joined(separator: ", "))")
-            }
-
-            // Weighted round-robin: track deficit per source, assign to most under-represented
-            var sourceDeficit = [SourceID: Double]()  // positive = under-allocated
             for src in enabledSources {
-                sourceDeficit[src.sourceID] = 0
-            }
-            var totalAssigned = 0
-
-            for key in orderedKeys {
-                guard let candidates = candidatesByKey[key] else { continue }
-                totalAssigned += 1
-
-                if useWeighted {
-                    // Pick the source with the highest deficit that has a candidate
-                    // Update deficits: each source "deserves" weight * totalAssigned scenes
-                    for src in enabledSources {
-                        let w = sourceWeights[src.sourceID] ?? (1.0 / Double(enabledSources.count))
-                        let deserved = w * Double(totalAssigned)
-                        let got = Double(sourceAssignCounts[src.sourceID] ?? 0)
-                        sourceDeficit[src.sourceID] = deserved - got
-                    }
-                    // Sort candidates by deficit (highest first)
-                    let ranked = candidates.sorted { a, b in
-                        (sourceDeficit[a.1.sourceID] ?? 0) > (sourceDeficit[b.1.sourceID] ?? 0)
-                    }
-                    let pick = ranked.first!
-                    taggedItems.append(TaggedItem(item: pick.0, config: pick.1, key: key))
-                    sourceAssignCounts[pick.1.sourceID, default: 0] += 1
-                } else {
-                    // Simple round-robin fallback
-                    let srcCount = enabledSources.count
-                    var assigned = false
-                    let rrIndex = totalAssigned % srcCount
-                    for offset in 0..<srcCount {
-                        let tryIdx = (rrIndex + offset) % srcCount
-                        let tryID = enabledSources[tryIdx].sourceID
-                        if let match = candidates.first(where: { $0.1.sourceID == tryID }) {
-                            taggedItems.append(TaggedItem(item: match.0, config: match.1, key: key))
-                            sourceAssignCounts[tryID, default: 0] += 1
-                            assigned = true
-                            break
-                        }
-                    }
-                    if !assigned, let fallback = candidates.first {
-                        taggedItems.append(TaggedItem(item: fallback.0, config: fallback.1, key: key))
-                        sourceAssignCounts[fallback.1.sourceID, default: 0] += 1
-                    }
-                }
+                let count = orderedKeys.filter { candidatesByKey[$0]?.contains(where: { $0.1.sourceID == src.sourceID }) ?? false }.count
+                sourceSearchStatus[src.sourceID] = "\(count) available"
+                log.info("\(src.shortName): \(count) scenes available")
             }
 
-            for src in enabledSources {
-                let count = sourceAssignCounts[src.sourceID] ?? 0
-                sourceSearchStatus[src.sourceID] = "\(count) assigned"
-                log.info("\(src.shortName): \(count) scenes assigned")
-            }
-
-            var totalItems = taggedItems.count
+            var totalItems = orderedKeys.count
             guard totalItems > 0 else {
                 log.error("No Sentinel-2 items found for date range")
                 throw STACError.noItems
             }
 
-            if let first = taggedItems.first?.item, let tile = first.mgrsTile {
+            if let firstKey = orderedKeys.first,
+               let firstItem = candidatesByKey[firstKey]?.first?.0,
+               let tile = firstItem.mgrsTile {
                 log.info("MGRS tile: \(tile)")
             }
             progressMessage = "Found \(totalItems) scenes — reading imagery..."
@@ -300,25 +227,44 @@ class NDVIProcessor {
 
             log.info("Downloading & processing \(totalItems) scenes (\(maxConc) streams, cloud \u{2264}\(Int(cloudThreshold))%)...")
 
-            // Process with limited concurrency, tracking stream slots and HTTP fallback
+            // Dynamic source selection: track per-source latency, pick fastest at dispatch time
             enum ProcessResult {
-                case success(NDVIFrame?, Int)  // frame (nil=skipped), slot
-                case httpFailed(String, SourceID, Int, Int)  // dateKey, failedSourceID, httpCode, slot
+                case success(NDVIFrame?, Int, SourceID, Double)  // frame, slot, sourceID, seconds
+                case httpFailed(String, SourceID, Int, Int, Double)  // key, sourceID, httpCode, slot, seconds
             }
 
             var httpErrorCount = 0
-            var retryQueue = [(item: STACItem, config: STACSourceConfig, key: String)]()
+            var retryQueue = [(key: String, excludeSource: SourceID)]()
             var currentMaxConc = maxConc
+            // Latency tracking (all on MainActor — safe)
+            var sourceLatencies = [SourceID: [Double]]()
+            var sourceInFlight = [SourceID: Int]()
+            var sourceCompleteCounts = [SourceID: Int]()
+
+            func avgLatency(_ sid: SourceID) -> Double {
+                guard let lats = sourceLatencies[sid], !lats.isEmpty else { return 1.0 }
+                let recent = lats.suffix(10)
+                return recent.reduce(0, +) / Double(recent.count)
+            }
+
+            func pickBestSource(from candidates: [(STACItem, STACSourceConfig)]) -> (STACItem, STACSourceConfig) {
+                guard candidates.count > 1 else { return candidates[0] }
+                return candidates.min(by: { a, b in
+                    let aScore = avgLatency(a.1.sourceID) + Double(sourceInFlight[a.1.sourceID] ?? 0) * 0.5
+                    let bScore = avgLatency(b.1.sourceID) + Double(sourceInFlight[b.1.sourceID] ?? 0) * 0.5
+                    return aScore < bScore
+                })!
+            }
 
             await withTaskGroup(of: ProcessResult.self) { group in
                 var running = 0
                 var nextSlot = 0
                 var freeSlots = [Int]()
+                var keyIndex = 0
 
-                // Helper to handle one result
                 func handleResult(_ result: ProcessResult) {
                     switch result {
-                    case .success(let frame, let slot):
+                    case .success(let frame, let slot, let sourceID, let seconds):
                         if let f = frame { newFrames.append(f) }
                         processedCount += 1
                         progress = Double(processedCount) / Double(totalItems)
@@ -327,50 +273,54 @@ class NDVIProcessor {
                             sourceProgresses[slot].completedItems += 1
                         }
                         freeSlots.append(slot)
+                        sourceLatencies[sourceID, default: []].append(seconds)
+                        sourceInFlight[sourceID, default: 0] -= 1
+                        sourceCompleteCounts[sourceID, default: 0] += 1
 
-                    case .httpFailed(let dateKey, let failedSrc, let code, let slot):
+                    case .httpFailed(let dateKey, let failedSrc, let code, let slot, let seconds):
                         processedCount += 1
                         progress = Double(processedCount) / Double(totalItems)
                         if slot < sourceProgresses.count {
                             sourceProgresses[slot].completedItems += 1
                         }
                         freeSlots.append(slot)
+                        sourceLatencies[failedSrc, default: []].append(seconds)
+                        sourceInFlight[failedSrc, default: 0] -= 1
 
                         httpErrorCount += 1
-                        // On 403, try alternate source
-                        if let alts = candidatesByKey[dateKey] {
-                            if let alt = alts.first(where: { $0.1.sourceID != failedSrc }) {
-                                log.warn("\(alt.0.dateString): \(failedSrc.rawValue.uppercased()) HTTP \(code), retrying from \(alt.1.shortName)")
-                                retryQueue.append((item: alt.0, config: alt.1, key: dateKey))
-                                totalItems += 1  // adjust total for the retry
-                            }
+                        if let alts = candidatesByKey[dateKey],
+                           alts.contains(where: { $0.1.sourceID != failedSrc }) {
+                            log.warn("\(dateKey): \(failedSrc.rawValue.uppercased()) HTTP \(code), will retry from alternate")
+                            retryQueue.append((key: dateKey, excludeSource: failedSrc))
+                            totalItems += 1
                         }
-                        // If many 403s, reduce concurrency
                         if code == 403 && httpErrorCount == 5 {
                             currentMaxConc = max(2, currentMaxConc / 2)
-                            log.warn("Rate limiting detected (\(httpErrorCount) x 403) — reducing concurrency to \(currentMaxConc)")
+                            log.warn("Rate limiting (\(httpErrorCount) x 403) — reducing to \(currentMaxConc) streams")
                         }
                     }
                     running -= 1
                 }
 
-                for tagged in taggedItems {
+                // Main work queue — dynamic source selection per scene
+                while keyIndex < orderedKeys.count {
                     if self.isCancelled { group.cancelAll(); break }
-
-                    // Wait while paused
                     while self.isPaused && !self.isCancelled {
                         try? await Task.sleep(for: .milliseconds(200))
                     }
                     if self.isCancelled { group.cancelAll(); break }
 
                     while running >= currentMaxConc {
-                        if let result = await group.next() {
-                            handleResult(result)
-                        }
+                        if let result = await group.next() { handleResult(result) }
                     }
 
-                    let cfg = tagged.config
-                    let dateKey = tagged.key
+                    let key = orderedKeys[keyIndex]
+                    keyIndex += 1
+                    guard let candidates = candidatesByKey[key] else { continue }
+
+                    let (item, cfg) = pickBestSource(from: candidates)
+                    sourceInFlight[cfg.sourceID, default: 0] += 1
+                    let dateKey = key
                     let slot = freeSlots.isEmpty ? nextSlot : freeSlots.removeFirst()
                     if freeSlots.isEmpty && nextSlot < maxConc { nextSlot += 1 }
                     if slot < sourceProgresses.count {
@@ -378,9 +328,10 @@ class NDVIProcessor {
                     }
 
                     group.addTask {
+                        let t0 = CFAbsoluteTimeGetCurrent()
                         do {
                             let frame = try await self.processItem(
-                                item: tagged.item, geometry: geometry,
+                                item: item, geometry: geometry,
                                 utm: utm, bbox: bbox, cogReader: cogReader,
                                 cloudThreshold: cloudThreshold,
                                 bandMapping: cfg.bandMapping,
@@ -389,46 +340,53 @@ class NDVIProcessor {
                                 sourceID: cfg.sourceID,
                                 collection: cfg.collection
                             )
-                            return .success(frame, slot)
+                            return .success(frame, slot, cfg.sourceID, CFAbsoluteTimeGetCurrent() - t0)
                         } catch let err as COGError {
+                            let elapsed = CFAbsoluteTimeGetCurrent() - t0
                             if case .httpError(let code) = err {
-                                return .httpFailed(dateKey, cfg.sourceID, code, slot)
+                                return .httpFailed(dateKey, cfg.sourceID, code, slot, elapsed)
                             }
-                            return .success(nil, slot)
+                            return .success(nil, slot, cfg.sourceID, elapsed)
                         } catch {
-                            return .success(nil, slot)
+                            return .success(nil, slot, cfg.sourceID, CFAbsoluteTimeGetCurrent() - t0)
                         }
                     }
                     running += 1
                 }
 
-                // Process retries (items that failed from primary source)
+                // Retries — pick from alternate sources, excluding the one that failed
                 while !retryQueue.isEmpty {
                     if self.isCancelled { group.cancelAll(); break }
-
                     while self.isPaused && !self.isCancelled {
                         try? await Task.sleep(for: .milliseconds(200))
                     }
                     if self.isCancelled { group.cancelAll(); break }
 
                     while running >= currentMaxConc {
-                        if let result = await group.next() {
-                            handleResult(result)
-                        }
+                        if let result = await group.next() { handleResult(result) }
                     }
 
                     let retry = retryQueue.removeFirst()
-                    let cfg = retry.config
+                    guard let candidates = candidatesByKey[retry.key]?.filter({ $0.1.sourceID != retry.excludeSource }),
+                          !candidates.isEmpty else {
+                        processedCount += 1
+                        progress = Double(processedCount) / Double(totalItems)
+                        continue
+                    }
+
+                    let (item, cfg) = pickBestSource(from: candidates)
+                    sourceInFlight[cfg.sourceID, default: 0] += 1
                     let slot = freeSlots.isEmpty ? nextSlot : freeSlots.removeFirst()
                     if freeSlots.isEmpty && nextSlot < maxConc { nextSlot += 1 }
                     if slot < sourceProgresses.count {
-                        sourceProgresses[slot].currentSource = "\(cfg.shortName) retry"
+                        sourceProgresses[slot].currentSource = "\(cfg.shortName)\u{21BA}"
                     }
 
                     group.addTask {
+                        let t0 = CFAbsoluteTimeGetCurrent()
                         do {
                             let frame = try await self.processItem(
-                                item: retry.item, geometry: geometry,
+                                item: item, geometry: geometry,
                                 utm: utm, bbox: bbox, cogReader: cogReader,
                                 cloudThreshold: cloudThreshold,
                                 bandMapping: cfg.bandMapping,
@@ -437,17 +395,23 @@ class NDVIProcessor {
                                 sourceID: cfg.sourceID,
                                 collection: cfg.collection
                             )
-                            return .success(frame, slot)
+                            return .success(frame, slot, cfg.sourceID, CFAbsoluteTimeGetCurrent() - t0)
                         } catch {
-                            return .success(nil, slot)  // don't retry twice
+                            return .success(nil, slot, cfg.sourceID, CFAbsoluteTimeGetCurrent() - t0)
                         }
                     }
                     running += 1
                 }
 
-                // Collect remaining
-                for await result in group {
-                    handleResult(result)
+                for await result in group { handleResult(result) }
+            }
+
+            // Log per-source performance summary
+            for src in enabledSources {
+                let count = sourceCompleteCounts[src.sourceID] ?? 0
+                let avg = avgLatency(src.sourceID)
+                if count > 0 {
+                    log.info("\(src.shortName): \(count) scenes, avg \(String(format: "%.1f", avg))s/scene")
                 }
             }
 
