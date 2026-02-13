@@ -47,8 +47,8 @@ class AppSettings {
     var pixelMinObservations: Int = 4 { didSet { save() } }
     var pixelSlopePerturbation: Double = 0.10 { didSet { save() } }
     var clusterFilterThreshold: Double = 4.0 { didSet { save() } }
-    var minSeasonLength: Int = 60 { didSet { save() } }
-    var maxSeasonLength: Int = 300 { didSet { save() } }
+    var minSeasonLength: Int = 50 { didSet { save() } }
+    var maxSeasonLength: Int = 150 { didSet { save() } }
 
     /// SCL classes to treat as VALID (not masked). User can toggle each.
     var sclValidClasses: Set<Int> = [4, 5, 6, 7] { didSet { save() } }

@@ -258,9 +258,13 @@ enum DoubleLogistic {
     }
 
     /// Ensemble fit: run from many perturbed starting points, return all viable solutions.
+    /// Perturbation is multiplicative: param * (1 + U(-p, p)) where U is uniform.
+    /// Slope parameters (rsp, rau) use a separate, tighter perturbation fraction.
     static func ensembleFit(
         data: [DataPoint],
         nRuns: Int = 50,
+        perturbation: Double = 0.50,
+        slopePerturbation: Double = 0.10,
         minSeasonLength: Double = 0,
         maxSeasonLength: Double = 366
     ) -> (best: DLParams, ensemble: [DLParams]) {
@@ -268,17 +272,21 @@ enum DoubleLogistic {
         let guess = initialGuess(data: filtered)
         var allFits = [DLParams]()
 
+        let p = perturbation
+        let sp = slopePerturbation
+
         // Run from perturbed initial conditions
         for i in 0..<nRuns {
             var perturbed = guess
             if i > 0 {
-                perturbed.mn += Double.random(in: -0.15...0.15)
-                perturbed.mx += Double.random(in: -0.15...0.15)
-                perturbed.sos += Double.random(in: -40...40)
-                perturbed.rsp += Double.random(in: -0.03...0.03)
-                perturbed.eos += Double.random(in: -40...40)
-                perturbed.rau += Double.random(in: -0.03...0.03)
-                // Clamp
+                // Multiplicative uniform perturbation: param * (1 + U(-p, p))
+                perturbed.mn  += guess.mn  * Double.random(in: -p...p)
+                perturbed.mx  += guess.mx  * Double.random(in: -p...p)
+                perturbed.sos += guess.sos * Double.random(in: -p...p)
+                perturbed.rsp += guess.rsp * Double.random(in: -sp...sp)
+                perturbed.eos += guess.eos * Double.random(in: -p...p)
+                perturbed.rau += guess.rau * Double.random(in: -sp...sp)
+                // Clamp to physical bounds
                 perturbed.mn = max(-0.5, min(0.8, perturbed.mn))
                 perturbed.mx = max(0.0, min(1.2, perturbed.mx))
                 perturbed.sos = max(1, min(250, perturbed.sos))

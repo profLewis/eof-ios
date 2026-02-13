@@ -180,20 +180,32 @@ Parameters:
 - **eos** — end of season (day of year)
 - **rau** — rate of autumn senescence
 
-Fitting uses Nelder-Mead simplex optimization with ensemble runs from perturbed starting points.
+### Fitting Algorithm
+
+All fitting (median-level and per-pixel) uses the same **Nelder-Mead simplex** optimizer with ensemble restarts from perturbed starting points:
+
+1. **Initial guess** — estimated from the data: mn/mx from 10th/90th percentile NDVI values, sos/eos from the first/last midpoint crossings in the time series, rsp/rau initialised to 0.05.
+2. **Cycle contamination filter** — before fitting, observations that appear to belong to an adjacent growing cycle are removed. The algorithm identifies the main peak (3-point moving average), computes a baseline threshold, and trims leading points that are above threshold and decreasing (previous cycle's senescence) and trailing points that are above threshold and increasing (next cycle's green-up).
+3. **Ensemble runs** — the optimizer is run N times (default 50 for median, 5 for per-pixel). Run 0 uses the initial guess directly. Runs 1..N-1 use **multiplicative uniform perturbation** of each parameter:
+   - For amplitude/timing parameters (mn, mx, sos, eos): `perturbed = guess * (1 + U(-p, p))` where `p` is the perturbation fraction (default 50%)
+   - For slope parameters (rsp, rau): `perturbed = guess * (1 + U(-sp, sp))` where `sp` is the slope perturbation fraction (default 10%). Slopes need less variation because the sigmoid shape is sensitive to these rates.
+   - All perturbations are drawn from a **flat (uniform) distribution**, not Gaussian.
+   - After perturbation, parameters are clamped to physical bounds (mn: -0.5–0.8, mx: 0.0–1.2, sos: 1–250, rsp: 0.001–0.5, eos: 100–366, rau: 0.001–0.5).
+4. **Nelder-Mead optimization** — each run minimizes RMSE between model and data using the simplex algorithm (reflect/expand/contract/shrink) with convergence tolerance 1e-8 and configurable max iterations (2000 for median, 500 for per-pixel).
+5. **Season length constraint** — a soft penalty is added to the cost function when `eos - sos` falls outside the allowed range: `cost += |violation| * 0.01`. This steers the optimizer away from physically implausible season lengths without hard-clipping.
+6. **Best fit selection** — the run with the lowest RMSE is kept. For the median ensemble, all solutions within 1.5x of the best RMSE are retained as "viable" for uncertainty visualization.
 
 ### Per-Pixel Phenology Fitting
 
 The app fits the double logistic model to **every individual pixel** in the AOI, not just the median time series:
 
-1. **Median fit as starting point** — the field-level median NDVI is fitted first. This provides robust initial parameter estimates.
-2. **Per-pixel ensemble fitting** — each pixel's NDVI time series is extracted from all frames. The median fit parameters are perturbed by ±N% (configurable, default 50%) and multiple ensemble runs (default 5) are performed per pixel using Nelder-Mead. The best fit (lowest RMSE) is kept.
-3. **Cycle contamination filtering** — before fitting, each pixel's data is filtered to remove observations that appear to belong to an adjacent growing cycle (e.g., late-season regrowth or early start from the previous year). This uses the median fit as a reference curve.
-4. **Quality classification** — each pixel is classified as:
+1. **Median fit as starting point** — the field-level median NDVI is fitted first using the ensemble algorithm above. This provides robust initial parameter estimates.
+2. **Per-pixel ensemble fitting** — each pixel's NDVI time series is extracted from all frames. The median fit parameters (not the data-derived initial guess) are used as the starting point. Perturbation fractions and ensemble size are taken from settings. The best fit (lowest RMSE) is kept.
+3. **Quality classification** — each pixel is classified as:
    - **Good** — converged fit with RMSE below threshold
    - **Poor** — fit converged but RMSE exceeds threshold
    - **Skipped** — too few valid observations to fit (< min observations)
-5. **Spatial parameter maps** — after fitting, any DL parameter (SOS, EOS, peak NDVI, min NDVI, green-up rate, senescence rate, RMSE, season length) can be displayed as a colour-mapped spatial map overlaid on the imagery.
+4. **Spatial parameter maps** — after fitting, any DL parameter (SOS, EOS, peak NDVI, min NDVI, green-up rate, senescence rate, RMSE, season length) can be displayed as a colour-mapped spatial map overlaid on the imagery.
 
 ### Cluster-Based Outlier Filtering
 
@@ -202,17 +214,20 @@ After per-pixel fitting, a cluster filter can identify and flag outlier pixels w
 1. **Robust statistics** — the median and MAD (median absolute deviation) of each of the 6 DL parameters are computed across all good-fit pixels.
 2. **Normalized distance** — for each pixel, a normalized distance is computed as the RMS of per-parameter z-scores: `z_i = |param_i - median_i| / MAD_i`, then `distance = sqrt(mean(z^2))`.
 3. **Threshold** — pixels with distance exceeding the configurable threshold (default 4.0 MADs) are flagged as candidate outliers.
-4. **Spatial regularization** — candidate outliers are checked against their 8-connected neighbors. If ≥50% of the pixel's valid neighbors are non-outlier (good fit), the pixel is "rescued" and kept as good. This prevents isolated statistical outliers surrounded by spatially coherent good fits from being incorrectly removed.
-5. **Filtered median refit** — after filtering, the median NDVI is recomputed using only good-fit pixels, and the DL model is re-fitted to this cleaned median. This provides an improved field-level phenology estimate.
+4. **Spatial regularization** — candidate outliers are checked against their 8-connected neighbors. If >=50% of the pixel's valid neighbors are non-outlier (good fit), the pixel is "rescued" and kept as good. This prevents isolated statistical outliers surrounded by spatially coherent good fits from being incorrectly removed.
+5. **Filtered median refit** — after filtering, the median NDVI is recomputed using only good-fit pixels, and the DL model is re-fitted to this cleaned median using the same ensemble algorithm. This provides an improved field-level phenology estimate.
 
 **Settings:**
 
 | Parameter | Default | Range | Description |
 |-----------|---------|-------|-------------|
 | Ensemble Runs | 5 | 1–20 | Number of fits per pixel from perturbed starts |
-| Perturbation | 50% | 5–100% | Proportional perturbation of median parameters |
+| Perturbation | 50% | 5–100% | Multiplicative perturbation of mn, mx, sos, eos (uniform) |
+| Slope Perturbation | 10% | 5–50% | Multiplicative perturbation of rsp, rau (uniform, tighter) |
 | RMSE Threshold | 0.10 | 0.02–0.30 | Maximum RMSE for "good" fit classification |
 | Min Observations | 4 | 3–10 | Minimum valid observations to attempt fit |
+| Min Season Length | 50 days | 10–200 | Minimum allowed EOS − SOS (soft penalty) |
+| Max Season Length | 150 days | 100–365 | Maximum allowed EOS − SOS (soft penalty) |
 | Cluster Threshold | 4.0 MADs | 2.0–8.0 | Outlier distance threshold (lower = stricter) |
 
 ### Parameter Uncertainty

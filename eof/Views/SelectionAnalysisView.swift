@@ -105,6 +105,8 @@ struct SelectionAnalysisView: View {
 
             let s = AppSettings.shared
             let result = DoubleLogistic.ensembleFit(data: data, nRuns: 20,
+                                                   perturbation: s.pixelPerturbation,
+                                                   slopePerturbation: s.pixelSlopePerturbation,
                                                    minSeasonLength: Double(s.minSeasonLength),
                                                    maxSeasonLength: Double(s.maxSeasonLength))
             selFit = result.best
