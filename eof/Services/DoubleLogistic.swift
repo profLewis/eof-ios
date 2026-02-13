@@ -92,7 +92,13 @@ enum DoubleLogistic {
     }
 
     /// Fit using Nelder-Mead simplex optimization.
-    static func fit(data: [DataPoint], initial: DLParams, maxIter: Int = 2000) -> DLParams {
+    static func fit(
+        data: [DataPoint],
+        initial: DLParams,
+        maxIter: Int = 2000,
+        minSeasonLength: Double = 0,
+        maxSeasonLength: Double = 366
+    ) -> DLParams {
         let n = 6  // number of parameters
         let x0 = initial.asArray
 
@@ -110,7 +116,15 @@ enum DoubleLogistic {
 
         func cost(_ x: [Double]) -> Double {
             let p = DLParams.from(clamp(x))
-            return rmse(params: p, data: data)
+            var c = rmse(params: p, data: data)
+            // Penalise season lengths outside allowed range
+            let seasonLen = p.eos - p.sos
+            if seasonLen < minSeasonLength {
+                c += (minSeasonLength - seasonLen) * 0.01
+            } else if seasonLen > maxSeasonLength {
+                c += (seasonLen - maxSeasonLength) * 0.01
+            }
+            return c
         }
 
         // Initialize simplex
@@ -244,7 +258,12 @@ enum DoubleLogistic {
     }
 
     /// Ensemble fit: run from many perturbed starting points, return all viable solutions.
-    static func ensembleFit(data: [DataPoint], nRuns: Int = 50) -> (best: DLParams, ensemble: [DLParams]) {
+    static func ensembleFit(
+        data: [DataPoint],
+        nRuns: Int = 50,
+        minSeasonLength: Double = 0,
+        maxSeasonLength: Double = 366
+    ) -> (best: DLParams, ensemble: [DLParams]) {
         let filtered = filterCycleContamination(data: data)
         let guess = initialGuess(data: filtered)
         var allFits = [DLParams]()
@@ -267,7 +286,8 @@ enum DoubleLogistic {
                 perturbed.eos = max(100, min(366, perturbed.eos))
                 perturbed.rau = max(0.001, min(0.5, perturbed.rau))
             }
-            let fitted = fit(data: filtered, initial: perturbed)
+            let fitted = fit(data: filtered, initial: perturbed,
+                           minSeasonLength: minSeasonLength, maxSeasonLength: maxSeasonLength)
             allFits.append(fitted)
         }
 
@@ -295,7 +315,8 @@ enum DoubleLogistic {
             return skip
         }
 
-        var bestFit = fit(data: filtered, initial: medianParams, maxIter: settings.maxIter)
+        var bestFit = fit(data: filtered, initial: medianParams, maxIter: settings.maxIter,
+                         minSeasonLength: settings.minSeasonLength, maxSeasonLength: settings.maxSeasonLength)
 
         for _ in 1..<settings.ensembleRuns {
             var perturbed = medianParams
@@ -315,7 +336,8 @@ enum DoubleLogistic {
             perturbed.eos = max(100, min(366, perturbed.eos))
             perturbed.rau = max(0.001, min(0.5, perturbed.rau))
 
-            let candidate = fit(data: filtered, initial: perturbed, maxIter: settings.maxIter)
+            let candidate = fit(data: filtered, initial: perturbed, maxIter: settings.maxIter,
+                              minSeasonLength: settings.minSeasonLength, maxSeasonLength: settings.maxSeasonLength)
             if candidate.rmse < bestFit.rmse {
                 bestFit = candidate
             }
@@ -333,4 +355,6 @@ struct PhenologyFitSettings: Sendable {
     let maxIter: Int
     let rmseThreshold: Double
     let minObservations: Int
+    let minSeasonLength: Double  // minimum eos - sos (days)
+    let maxSeasonLength: Double  // maximum eos - sos (days)
 }

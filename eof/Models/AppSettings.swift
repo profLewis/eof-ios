@@ -47,6 +47,8 @@ class AppSettings {
     var pixelMinObservations: Int = 4 { didSet { save() } }
     var pixelSlopePerturbation: Double = 0.10 { didSet { save() } }
     var clusterFilterThreshold: Double = 4.0 { didSet { save() } }
+    var minSeasonLength: Int = 60 { didSet { save() } }
+    var maxSeasonLength: Int = 300 { didSet { save() } }
 
     /// SCL classes to treat as VALID (not masked). User can toggle each.
     var sclValidClasses: Set<Int> = [4, 5, 6, 7] { didSet { save() } }
@@ -166,6 +168,8 @@ class AppSettings {
         defaults.set(pixelMinObservations, forKey: prefix + "pixelMinObservations")
         defaults.set(pixelSlopePerturbation, forKey: prefix + "pixelSlopePerturbation")
         defaults.set(clusterFilterThreshold, forKey: prefix + "clusterFilterThreshold")
+        defaults.set(minSeasonLength, forKey: prefix + "minSeasonLength")
+        defaults.set(maxSeasonLength, forKey: prefix + "maxSeasonLength")
     }
 
     private func load() {
@@ -212,6 +216,10 @@ class AppSettings {
         if psp > 0 { pixelSlopePerturbation = psp }
         let cft = defaults.double(forKey: prefix + "clusterFilterThreshold")
         if cft > 0 { clusterFilterThreshold = cft }
+        let msl = defaults.integer(forKey: prefix + "minSeasonLength")
+        if msl > 0 { minSeasonLength = msl }
+        let mxl = defaults.integer(forKey: prefix + "maxSeasonLength")
+        if mxl > 0 { maxSeasonLength = mxl }
     }
 
     var startDateString: String {

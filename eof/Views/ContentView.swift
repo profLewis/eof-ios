@@ -1070,8 +1070,10 @@ struct ContentView: View {
             DoubleLogistic.DataPoint(doy: Double(f.dayOfYear), ndvi: Double(f.medianNDVI))
         }
         guard data.count >= 4 else { return }
+        let minSL = Double(settings.minSeasonLength)
+        let maxSL = Double(settings.maxSeasonLength)
         Task.detached {
-            let result = DoubleLogistic.ensembleFit(data: data)
+            let result = DoubleLogistic.ensembleFit(data: data, minSeasonLength: minSL, maxSeasonLength: maxSL)
             await MainActor.run {
                 dlBest = result.best
                 dlEnsemble = result.ensemble
@@ -1097,7 +1099,9 @@ struct ContentView: View {
             slopePerturbation: settings.pixelSlopePerturbation,
             maxIter: 500,
             rmseThreshold: settings.pixelFitRMSEThreshold,
-            minObservations: settings.pixelMinObservations
+            minObservations: settings.pixelMinObservations,
+            minSeasonLength: Double(settings.minSeasonLength),
+            maxSeasonLength: Double(settings.maxSeasonLength)
         )
 
         Task.detached {
@@ -1148,8 +1152,10 @@ struct ContentView: View {
             data.append(DoubleLogistic.DataPoint(doy: Double(frame.dayOfYear), ndvi: Double(m)))
         }
         guard data.count >= 4 else { return }
+        let minSL = Double(settings.minSeasonLength)
+        let maxSL = Double(settings.maxSeasonLength)
         Task.detached {
-            let result = DoubleLogistic.ensembleFit(data: data)
+            let result = DoubleLogistic.ensembleFit(data: data, minSeasonLength: minSL, maxSeasonLength: maxSL)
             await MainActor.run {
                 dlBest = result.best
                 dlSliders = result.best
@@ -1171,8 +1177,10 @@ struct ContentView: View {
             DoubleLogistic.DataPoint(doy: Double(f.dayOfYear), ndvi: Double(f.medianNDVI))
         }
         guard data.count >= 4 else { return }
+        let minSL = Double(settings.minSeasonLength)
+        let maxSL = Double(settings.maxSeasonLength)
         Task.detached {
-            let result = DoubleLogistic.ensembleFit(data: data)
+            let result = DoubleLogistic.ensembleFit(data: data, minSeasonLength: minSL, maxSeasonLength: maxSL)
             await MainActor.run {
                 dlBest = result.best
                 dlSliders = result.best
@@ -1187,13 +1195,16 @@ struct ContentView: View {
             DoubleLogistic.DataPoint(doy: Double(f.dayOfYear), ndvi: Double(f.medianNDVI))
         }
         guard data.count >= 4 else { return }
+        let minSL = Double(settings.minSeasonLength)
+        let maxSL = Double(settings.maxSeasonLength)
         Task.detached {
-            let fitted = DoubleLogistic.fit(data: data, initial: start)
+            let fitted = DoubleLogistic.fit(data: data, initial: start,
+                                           minSeasonLength: minSL, maxSeasonLength: maxSL)
             await MainActor.run {
                 dlBest = fitted
                 dlSliders = fitted
                 // Re-run ensemble from this better starting point
-                let result = DoubleLogistic.ensembleFit(data: data)
+                let result = DoubleLogistic.ensembleFit(data: data, minSeasonLength: minSL, maxSeasonLength: maxSL)
                 dlEnsemble = result.ensemble
                 if result.best.rmse < fitted.rmse {
                     dlBest = result.best

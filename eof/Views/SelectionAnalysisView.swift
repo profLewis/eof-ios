@@ -103,7 +103,10 @@ struct SelectionAnalysisView: View {
             let doyLast = cal.ordinality(of: .day, in: .year, for: last.date) ?? 365
             let step = max(1, (doyLast - doyFirst) / 60)
 
-            let result = DoubleLogistic.ensembleFit(data: data, nRuns: 20)
+            let s = AppSettings.shared
+            let result = DoubleLogistic.ensembleFit(data: data, nRuns: 20,
+                                                   minSeasonLength: Double(s.minSeasonLength),
+                                                   maxSeasonLength: Double(s.maxSeasonLength))
             selFit = result.best
 
             for doy in stride(from: doyFirst, through: doyLast, by: step) {

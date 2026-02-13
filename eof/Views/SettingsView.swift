@@ -173,7 +173,11 @@ struct SettingsView: View {
                         }
                         Slider(value: $settings.clusterFilterThreshold, in: 2.0...8.0, step: 0.5)
                     }
-                    Text("Per-pixel fitting uses median fit as starting point. Higher perturbation explores more but is slower. Cluster filter threshold controls outlier sensitivity — lower values are stricter. Spatial regularization rescues isolated outliers with good neighbors.")
+                    Stepper("Min Season Length: \(settings.minSeasonLength) days",
+                            value: $settings.minSeasonLength, in: 10...200, step: 10)
+                    Stepper("Max Season Length: \(settings.maxSeasonLength) days",
+                            value: $settings.maxSeasonLength, in: 100...365, step: 10)
+                    Text("Per-pixel fitting uses median fit as starting point. Higher perturbation explores more but is slower. Cluster filter threshold controls outlier sensitivity — lower values are stricter. Spatial regularization rescues isolated outliers with good neighbors. Season length constraints limit EOS − SOS.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
