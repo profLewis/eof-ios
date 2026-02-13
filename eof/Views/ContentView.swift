@@ -1027,6 +1027,18 @@ struct ContentView: View {
         }
     }
 
+    private func logDistributions(label: String, base: DLParams, p: Double, sp: Double, nRuns: Int, minSL: Double, maxSL: Double) {
+        let f3 = { (v: Double) in String(format: "%.3f", v) }
+        let f1 = { (v: Double) in String(format: "%.1f", v) }
+        log.info("\(label): \(nRuns) runs, perturbation=\(Int(p*100))%, slope=\(Int(sp*100))%, season=\(Int(minSL))-\(Int(maxSL))d")
+        log.info("  mn:  \(f3(base.mn))  * U(\(f3(1-p)), \(f3(1+p))) → [\(f3(base.mn*(1-p))), \(f3(base.mn*(1+p)))]")
+        log.info("  mx:  \(f3(base.mx))  * U(\(f3(1-p)), \(f3(1+p))) → [\(f3(base.mx*(1-p))), \(f3(base.mx*(1+p)))]")
+        log.info("  sos: \(f1(base.sos)) * U(\(f3(1-p)), \(f3(1+p))) → [\(f1(base.sos*(1-p))), \(f1(base.sos*(1+p)))]")
+        log.info("  rsp: \(f3(base.rsp)) * U(\(f3(1-sp)), \(f3(1+sp))) → [\(f3(base.rsp*(1-sp))), \(f3(base.rsp*(1+sp)))]")
+        log.info("  eos: \(f1(base.eos)) * U(\(f3(1-p)), \(f3(1+p))) → [\(f1(base.eos*(1-p))), \(f1(base.eos*(1+p)))]")
+        log.info("  rau: \(f3(base.rau)) * U(\(f3(1-sp)), \(f3(1+sp))) → [\(f3(base.rau*(1-sp))), \(f3(base.rau*(1+sp)))]")
+    }
+
     private func runDLFit() {
         let data = processor.frames.map { f in
             DoubleLogistic.DataPoint(doy: Double(f.dayOfYear), ndvi: Double(f.medianNDVI))
@@ -1036,6 +1048,12 @@ struct ContentView: View {
         let sp = settings.pixelSlopePerturbation
         let minSL = Double(settings.minSeasonLength)
         let maxSL = Double(settings.maxSeasonLength)
+
+        // Log the initial guess and perturbation ranges
+        let filtered = DoubleLogistic.filterCycleContamination(data: data)
+        let guess = DoubleLogistic.initialGuess(data: filtered)
+        logDistributions(label: "Median DL fit", base: guess, p: p, sp: sp, nRuns: 50, minSL: minSL, maxSL: maxSL)
+
         Task.detached {
             let result = DoubleLogistic.ensembleFit(data: data,
                 perturbation: p, slopePerturbation: sp,
@@ -1069,6 +1087,10 @@ struct ContentView: View {
             minSeasonLength: Double(settings.minSeasonLength),
             maxSeasonLength: Double(settings.maxSeasonLength)
         )
+
+        logDistributions(label: "Per-pixel DL fit", base: medianFit, p: settings.pixelPerturbation,
+                         sp: settings.pixelSlopePerturbation, nRuns: settings.pixelEnsembleRuns,
+                         minSL: Double(settings.minSeasonLength), maxSL: Double(settings.maxSeasonLength))
 
         Task.detached {
             let result = await PixelPhenologyFitter.fitAllPixels(
