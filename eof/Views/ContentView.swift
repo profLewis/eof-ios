@@ -102,7 +102,7 @@ struct ContentView: View {
                 if processor.status == .done || processor.status == .error {
                     stopPlayback()
                     currentFrameIndex = 0
-                    processor.clearCache()
+                    processor.resetGeometry()
                     processor.status = .idle
                     processor.frames = []
                     processor.progress = 0

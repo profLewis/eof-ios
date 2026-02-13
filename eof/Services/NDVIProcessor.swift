@@ -15,8 +15,6 @@ class NDVIProcessor {
     var isCancelled = false
     var isPaused = false
 
-    // Date range cache — frames outside current range but same AOI
-    private var cachedFrames: [NDVIFrame] = []
     private var lastGeometryCentroid: (lon: Double, lat: Double)?
     private var fetchTask: Task<Void, Never>?
 
@@ -175,30 +173,71 @@ class NDVIProcessor {
                 }
             }
 
-            // Round-robin assign each scene to a source
+            // Assign scenes to sources — weighted by benchmark speed if available
             var taggedItems = [TaggedItem]()
             var sourceAssignCounts = [SourceID: Int]()
-            var rrIndex = Int.random(in: 0..<enabledSources.count)  // randomize starting source
-            let srcCount = enabledSources.count
+
+            // Compute target allocation weights from benchmarks (faster = more scenes)
+            let benchmarks = settings.benchmarkResults
+            let useWeighted = settings.smartAllocation && !benchmarks.isEmpty
+            var sourceWeights = [SourceID: Double]()
+            if useWeighted {
+                let streamAlloc = SourceBenchmarkService.allocateStreams(
+                    benchmarks: benchmarks, totalStreams: orderedKeys.count
+                )
+                let totalAlloc = Double(streamAlloc.values.reduce(0, +))
+                for (sid, count) in streamAlloc {
+                    sourceWeights[sid] = totalAlloc > 0 ? Double(count) / totalAlloc : 0
+                }
+                log.info("Weighted allocation: \(streamAlloc.map { "\($0.key.rawValue): \($0.value)" }.joined(separator: ", "))")
+            }
+
+            // Weighted round-robin: track deficit per source, assign to most under-represented
+            var sourceDeficit = [SourceID: Double]()  // positive = under-allocated
+            for src in enabledSources {
+                sourceDeficit[src.sourceID] = 0
+            }
+            var totalAssigned = 0
 
             for key in orderedKeys {
                 guard let candidates = candidatesByKey[key] else { continue }
-                // Try round-robin source first, fall back to any available
-                var assigned = false
-                for offset in 0..<srcCount {
-                    let tryIdx = (rrIndex + offset) % srcCount
-                    let tryID = enabledSources[tryIdx].sourceID
-                    if let match = candidates.first(where: { $0.1.sourceID == tryID }) {
-                        taggedItems.append(TaggedItem(item: match.0, config: match.1, key: key))
-                        sourceAssignCounts[tryID, default: 0] += 1
-                        if offset == 0 { rrIndex = (rrIndex + 1) % srcCount }
-                        assigned = true
-                        break
+                totalAssigned += 1
+
+                if useWeighted {
+                    // Pick the source with the highest deficit that has a candidate
+                    // Update deficits: each source "deserves" weight * totalAssigned scenes
+                    for src in enabledSources {
+                        let w = sourceWeights[src.sourceID] ?? (1.0 / Double(enabledSources.count))
+                        let deserved = w * Double(totalAssigned)
+                        let got = Double(sourceAssignCounts[src.sourceID] ?? 0)
+                        sourceDeficit[src.sourceID] = deserved - got
                     }
-                }
-                if !assigned, let fallback = candidates.first {
-                    taggedItems.append(TaggedItem(item: fallback.0, config: fallback.1, key: key))
-                    sourceAssignCounts[fallback.1.sourceID, default: 0] += 1
+                    // Sort candidates by deficit (highest first)
+                    let ranked = candidates.sorted { a, b in
+                        (sourceDeficit[a.1.sourceID] ?? 0) > (sourceDeficit[b.1.sourceID] ?? 0)
+                    }
+                    let pick = ranked.first!
+                    taggedItems.append(TaggedItem(item: pick.0, config: pick.1, key: key))
+                    sourceAssignCounts[pick.1.sourceID, default: 0] += 1
+                } else {
+                    // Simple round-robin fallback
+                    let srcCount = enabledSources.count
+                    var assigned = false
+                    let rrIndex = totalAssigned % srcCount
+                    for offset in 0..<srcCount {
+                        let tryIdx = (rrIndex + offset) % srcCount
+                        let tryID = enabledSources[tryIdx].sourceID
+                        if let match = candidates.first(where: { $0.1.sourceID == tryID }) {
+                            taggedItems.append(TaggedItem(item: match.0, config: match.1, key: key))
+                            sourceAssignCounts[tryID, default: 0] += 1
+                            assigned = true
+                            break
+                        }
+                    }
+                    if !assigned, let fallback = candidates.first {
+                        taggedItems.append(TaggedItem(item: fallback.0, config: fallback.1, key: key))
+                        sourceAssignCounts[fallback.1.sourceID, default: 0] += 1
+                    }
                 }
             }
 
@@ -410,7 +449,6 @@ class NDVIProcessor {
             // Sort by date — keep whatever frames we have (even if cancelled)
             frames = newFrames.sorted { $0.date < $1.date }
             lastGeometryCentroid = (lon: centroid.lon, lat: centroid.lat)
-            cachedFrames = []
 
             if isCancelled {
                 isCancelled = false
@@ -445,15 +483,14 @@ class NDVIProcessor {
         }
     }
 
-    /// Incrementally update for a new date range: keep/restore matching frames, fetch only new dates.
+    /// Incrementally update for a new date range: keep in-range frames, fetch only new dates.
     @MainActor
     func updateDateRange(geometry: GeoJSONGeometry, startDate: String, endDate: String) async {
-        // Check if AOI moved — if so, drop cache and do full fetch
+        // Check if AOI moved — if so, do full fetch
         let centroid = geometry.centroid
         if let prev = lastGeometryCentroid,
            abs(prev.lon - centroid.lon) > 0.001 || abs(prev.lat - centroid.lat) > 0.001 {
             log.info("AOI changed spatially — full re-fetch")
-            cachedFrames = []
             await fetch(geometry: geometry, startDate: startDate, endDate: endDate)
             return
         }
@@ -467,34 +504,12 @@ class NDVIProcessor {
             return
         }
 
-        // Move out-of-range frames to cache, keep in-range ones
-        var kept = [NDVIFrame]()
-        var toCache = [NDVIFrame]()
-        for frame in frames {
-            if frame.date >= newStart && frame.date <= newEnd.addingTimeInterval(86400) {
-                kept.append(frame)
-            } else {
-                toCache.append(frame)
-            }
-        }
-        cachedFrames.append(contentsOf: toCache)
+        // Keep only in-range frames, discard the rest
+        var kept = frames.filter { $0.date >= newStart && $0.date <= newEnd.addingTimeInterval(86400) }
+        let dropped = frames.count - kept.count
+        let existingDates = Set(kept.map { $0.dateString })
 
-        // Restore cached frames that are now in range
-        var restored = [NDVIFrame]()
-        var stillCached = [NDVIFrame]()
-        for frame in cachedFrames {
-            if frame.date >= newStart && frame.date <= newEnd.addingTimeInterval(86400) {
-                restored.append(frame)
-            } else {
-                stillCached.append(frame)
-            }
-        }
-        cachedFrames = stillCached
-
-        let existingDates = Set((kept + restored).map { $0.dateString })
-        kept.append(contentsOf: restored)
-
-        log.info("Date update: keeping \(kept.count) frames (\(restored.count) restored from cache), \(toCache.count) cached")
+        log.info("Date update: keeping \(kept.count) frames, dropped \(dropped)")
 
         // Determine which date sub-ranges need fetching
         // Find the previous date range from existing frames
@@ -620,7 +635,7 @@ class NDVIProcessor {
         frames = kept.sorted { $0.date < $1.date }
         lastGeometryCentroid = (lon: centroid.lon, lat: centroid.lat)
         progress = 1.0
-        let msg = "Updated: \(frames.count) frames (\(newFrames.count) new, \(toCache.count) cached)"
+        let msg = "Updated: \(frames.count) frames (\(newFrames.count) new, \(dropped) dropped)"
         progressMessage = msg
         status = .done
         log.success(msg)
@@ -651,9 +666,8 @@ class NDVIProcessor {
         log.info("Fetch resumed")
     }
 
-    /// Clear frame cache (call when AOI changes spatially).
-    func clearCache() {
-        cachedFrames = []
+    /// Reset state (call when AOI changes spatially).
+    func resetGeometry() {
         lastGeometryCentroid = nil
     }
 
