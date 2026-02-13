@@ -13,6 +13,7 @@ struct SelectionAnalysisView: View {
 
     // Async-computed results
     @State private var isProcessing = true
+    @State private var computeTask: Task<Void, Never>?
     @State private var ndviPoints: [(date: Date, mean: Double)] = []
     @State private var fitCurve: [(date: Date, ndvi: Double)] = []
     @State private var medianCurve: [(date: Date, ndvi: Double)] = []
@@ -36,8 +37,13 @@ struct SelectionAnalysisView: View {
                         .buttonStyle(.glass)
                 }
             }
-            .task {
-                await computeAll()
+            .onAppear {
+                guard computeTask == nil else { return }
+                computeTask = Task { await computeAll() }
+            }
+            .onDisappear {
+                computeTask?.cancel()
+                computeTask = nil
             }
         }
     }
