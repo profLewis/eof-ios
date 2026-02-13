@@ -514,25 +514,18 @@ struct ContentView: View {
                     .lineStyle(StrokeStyle(lineWidth: 2))
                 }
 
-                // Filtered median NDVI (after cluster filter)
+                // Filtered median NDVI (after cluster filter) — open circles
                 if let pp = pixelPhenology, pp.outlierCount > 0 {
                     let filteredMedians = pp.filteredMedianNDVI(frames: sorted)
                     ForEach(Array(zip(sorted.indices, sorted)), id: \.1.id) { idx, frame in
                         if idx < filteredMedians.count, !filteredMedians[idx].isNaN {
-                            LineMark(
-                                x: .value("Date", frame.date),
-                                y: .value("NDVI", Double(filteredMedians[idx])),
-                                series: .value("Series", "Filtered")
-                            )
-                            .foregroundStyle(.yellow)
-                            .lineStyle(StrokeStyle(lineWidth: 2))
-
                             PointMark(
                                 x: .value("Date", frame.date),
                                 y: .value("NDVI", Double(filteredMedians[idx]))
                             )
                             .foregroundStyle(.yellow)
-                            .symbolSize(12)
+                            .symbol(.circle)
+                            .symbolSize(30)
                         }
                     }
                 }
