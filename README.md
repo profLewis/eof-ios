@@ -17,7 +17,7 @@
 - **Per-pixel phenology fitting** with parallel processing — generates spatial parameter maps (SOS, EOS, peak NDVI, RMSE, etc.)
 - Long-press any pixel to inspect its individual NDVI time series, DL fit curve, reflectance data, and SCL history
 - Satellite basemap underneath imagery (Apple Maps)
-- Multi-source redundancy with automatic HTTP error fallback between AWS and Planetary Computer
+- Multi-source redundancy with automatic fallback, **race scheduling** (idle slots race slow sources), and preference for highest processing baseline
 - Configurable: date range, AOI (GeoJSON polygon, URL, or manual lat/lon), cloud threshold, SCL class filtering, concurrency
 
 ## Getting It On Your iPhone
@@ -187,31 +187,44 @@ The app can fetch Sentinel-2 L2A data from multiple independent data centres. Ea
 
 ### Source Selection and Redundancy
 
-The app probes all enabled sources at startup via a benchmark (STAC search + COG header fetch). When **Smart Stream Allocation** is enabled (Settings > Data Sources), concurrent download streams are allocated proportionally to each source's measured speed. If a source returns HTTP errors during a fetch, the app automatically retries the same scene from an alternate source.
+The app uses **adaptive scheduling** to maximise throughput across multiple data sources:
 
-Sources can be reordered by dragging in the Data Sources list. The order determines trust priority when multiple sources have data for the same date — the first source in the list is preferred unless it's slower (when smart allocation is on).
+1. **Latency-aware dispatch** — each source's rolling average response time is tracked. New tasks are assigned to the fastest source (within a 20% tolerance band).
+2. **Processing baseline preference** — among sources with similar latency, the one with the **highest processing baseline** is preferred (newer processing = better atmospheric correction).
+3. **In-flight penalty** — sources with many active requests are penalised in the scoring, preventing a slow source from hogging all slots.
+4. **Race scheduling** — after the main work queue is exhausted, if some dates are still in-flight from a slow source and concurrency slots are idle, the app launches **duplicate requests** from alternate sources. Whichever finishes first wins; the duplicate is discarded. Race tasks show a lightning bolt (`⚡`) in the progress display. Racing is disabled in source comparison mode.
+5. **Automatic retry** — if a source returns an HTTP error, the app retries the same scene from an alternate source. Repeated 403 errors trigger adaptive throttling (concurrent streams reduced by 50%).
+6. **Comparison mode** — when comparing sources, all enabled sources are fetched for every date. Sources that fail for all samples are automatically excluded from the comparison report.
 
 ### DN to Reflectance Conversion
 
 Different data centres apply different processing to the raw ESA Sentinel-2 data. Understanding the **DN (Digital Number) to surface reflectance** conversion is critical for consistent cross-source analysis.
 
-**The standard ESA formula is:**
+**The standard ESA formula** ([SentiWiki](https://sentiwiki.copernicus.eu/web/s2-products)) is:
 
 ```
 reflectance = (DN + BOA_ADD_OFFSET) / QUANTIFICATION_VALUE
 ```
 
-Where `QUANTIFICATION_VALUE = 10000` and `BOA_ADD_OFFSET = -1000` for processing baseline >= 04.00 (all data from ~January 2022 onwards).
+Where `QUANTIFICATION_VALUE = 10000` and `BOA_ADD_OFFSET = -1000` for processing baseline >= 04.00 (all data from ~January 2022 onwards). See the [ESA PB 04.00 release note](https://sentinels.copernicus.eu/web/sentinel/-/copernicus-sentinel-2-major-products-upgrade-upcoming).
 
 **How each source handles this:**
 
-| Source | Raw DN range (typical vegetation red band) | `earthsearch:boa_offset_applied` | `s2:processing_baseline` | What the app does |
-|--------|---------------------------------------------|----------------------------------|--------------------------|-------------------|
-| **AWS** | ~100–700 | `true` | e.g. `05.10` | AWS has **already subtracted 1000** from the DNs. The app uses `dnOffset = 0`, so `reflectance = DN / 10000`. |
-| **PC** | ~1100–1700 | not present | e.g. `05.10` | PC serves **raw ESA DNs** with the +1000 still present. The app detects `processing_baseline >= 4.0` and applies `dnOffset = -1000`, so `reflectance = (DN - 1000) / 10000`. |
-| **CDSE** | ~1100–1700 | not present | e.g. `05.10` | Same as PC — raw ESA DNs. Same offset correction. |
-| **GEE** | ~100–700 (S2_SR_HARMONIZED) | n/a | n/a | GEE's `S2_SR_HARMONIZED` collection has already applied the offset. `dnOffset = 0`, so `reflectance = DN / 10000`. |
-| **HLS** | ~100–700 | n/a | n/a | HLS has its own harmonization pipeline. No BOA offset. `reflectance = DN / 10000`. |
+| Source | Product | DN range (red, veg) | Offset pre-applied? | App `dnOffset` | Formula | Reference |
+|--------|---------|---------------------|----------------------|----------------|---------|-----------|
+| **AWS Earth Search** | S2 L2A COG | ~100–700 | **Yes** (`boa_offset_applied=true`) | `0` | `DN / 10000` | [Element 84 discussion #26](https://github.com/Element84/earth-search/discussions/26) |
+| **Planetary Computer** | S2 L2A COG | ~1100–1700 | **No** (raw ESA DNs) | `-1000` | `(DN - 1000) / 10000` | [PC issue #134](https://github.com/microsoft/PlanetaryComputer/issues/134), [dataset page](https://planetarycomputer.microsoft.com/dataset/sentinel-2-l2a) |
+| **CDSE** | S2 L2A JP2 | ~1100–1700 | **No** (raw ESA DNs) | `-1000` | `(DN - 1000) / 10000` | [CDSE S2 L2A docs](https://documentation.dataspace.copernicus.eu/APIs/SentinelHub/Data/S2L2A.html) |
+| **Google Earth Engine** | S2_SR_HARMONIZED | ~100–700 | **Yes** (harmonized) | `0` | `DN / 10000` | [GEE catalog](https://developers.google.com/earth-engine/datasets/catalog/COPERNICUS_S2_SR_HARMONIZED) |
+| **NASA Earthdata** | HLS S30 v2.0 | ~100–700 | n/a (different product) | `0` | `DN × 0.0001` | [HLS User Guide (PDF)](https://lpdaac.usgs.gov/documents/1698/HLS_User_Guide_V2.pdf), [Earthdata catalog](https://www.earthdata.nasa.gov/data/catalog/lpcloud-hlss30-2.0) |
+
+**Key differences:**
+
+- **AWS** converts ESA JP2 to COG and subtracts the 1000 offset during conversion. Their STAC metadata includes `earthsearch:boa_offset_applied = true`. The app hardcodes `dnOffset = 0` for AWS regardless of metadata.
+- **Planetary Computer** serves raw ESA DNs as COGs without modifying pixel values. For PB >= 04.00 data, the +1000 is still present. The app reads `s2:processing_baseline` from STAC metadata and applies `dnOffset = -1000` when PB >= 4.0.
+- **CDSE** serves original ESA products (JP2). Same offset behaviour as PC.
+- **GEE** `S2_SR_HARMONIZED` applies the offset correction server-side. DN values are already harmonized across all processing baselines.
+- **HLS** is a different product (Harmonized Landsat Sentinel-2) with its own atmospheric correction pipeline. Scale factor is 0.0001 with no additive offset.
 
 **Verification:** For the same scene (tile T35JPL, 2024-06-14), GDAL pixel extraction confirms:
 - AWS red band DN median: **1104**
@@ -290,15 +303,16 @@ A tabular summary for each acquisition date:
 | **[srcA]** | Median NDVI from source A |
 | **[srcB]** | Median NDVI from source B |
 | **Δ** | Difference (A − B). Values > 0.02 are highlighted in red. |
-| **nA** | Number of valid pixels in source A |
-| **nB** | Number of valid pixels in source B |
-| **offA** | DN offset applied for source A (0 = no offset, -1000 = offset subtracted) |
-| **offB** | DN offset applied for source B |
+| **ofs-A** | DN offset applied for source A (0 = no offset, -1000 = offset subtracted). Orange when non-zero. |
+| **ofs-B** | DN offset applied for source B |
+| **PB** | Processing baseline for each source (e.g. `05.10/05.10`) |
+
+The header also shows a per-source offset summary (consistent or MIXED) and the formula `reflectance = (DN + offset) / 10000`.
 
 **What to expect:**
 - **Δ (NDVI difference)**: Should be small (< 0.01) for most dates. Dates highlighted in red (Δ > 0.02) may have different cloud masks or different scene geometries.
-- **nA vs nB**: The valid pixel counts should be similar. Large differences indicate that one source masks significantly more pixels (e.g., stricter cloud detection).
-- **offA vs offB**: AWS should show 0 (offset already applied), PC should show -1000 (app corrects it). If both show 0 or both show -1000, there may be a configuration issue.
+- **ofs-A vs ofs-B**: AWS should show 0 (offset already applied), PC should show -1000 (app corrects it). Each source should show the same offset for all dates. If a source shows MIXED offsets, it may indicate inconsistent metadata.
+- **PB**: Both sources should typically show the same processing baseline. Mismatches (shown in red) indicate different reprocessing versions.
 
 ### Interpreting Results
 

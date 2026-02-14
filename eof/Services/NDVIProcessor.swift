@@ -267,7 +267,7 @@ class NDVIProcessor {
 
             // Dynamic source selection: track per-source latency, pick fastest at dispatch time
             enum ProcessResult {
-                case success(NDVIFrame?, Int, SourceID, Double)  // frame, slot, sourceID, seconds
+                case success(NDVIFrame?, Int, SourceID, Double, String)  // frame, slot, sourceID, seconds, dateKey
                 case httpFailed(String, SourceID, Int, Int, Double)  // key, sourceID, httpCode, slot, seconds
             }
 
@@ -294,7 +294,15 @@ class NDVIProcessor {
                 let bestScore = scored.map(\.1).min()!
                 let threshold = bestScore * 1.2 + 0.1  // 20% tolerance + small absolute margin
                 let eligible = scored.filter { $0.1 <= threshold }.map(\.0)
-                return eligible.randomElement()!
+                // Among eligible, prefer highest processing baseline
+                let sorted = eligible.sorted { a, b in
+                    let pbA = Double(a.0.properties.processingBaseline ?? "0") ?? 0
+                    let pbB = Double(b.0.properties.processingBaseline ?? "0") ?? 0
+                    return pbA > pbB
+                }
+                let bestPB = Double(sorted[0].0.properties.processingBaseline ?? "0") ?? 0
+                let topPB = sorted.filter { (Double($0.0.properties.processingBaseline ?? "0") ?? 0) == bestPB }
+                return topPB.randomElement()!
             }
 
             await withTaskGroup(of: ProcessResult.self) { group in
@@ -302,57 +310,81 @@ class NDVIProcessor {
                 var nextSlot = 0
                 var freeSlots = [Int]()
                 var keyIndex = 0
+                // Race tracking: which keys have completed, which are in-flight, which sources launched per key
+                var completedKeys = Set<String>()
+                var inFlightKeys = [String: Int]()
+                var keySourcesUsed = [String: Set<SourceID>]()
 
                 func handleResult(_ result: ProcessResult) {
                     switch result {
-                    case .success(let frame, let slot, let sourceID, let seconds):
-                        if let f = frame { newFrames.append(f) }
-                        processedCount += 1
-                        progress = Double(processedCount) / Double(totalItems)
-                        progressMessage = "Reading imagery \(processedCount)/\(totalItems)..."
-                        if slot < sourceProgresses.count {
-                            sourceProgresses[slot].completedItems += 1
+                    case .success(let frame, let slot, let sourceID, let seconds, let dateKey):
+                        inFlightKeys[dateKey, default: 0] -= 1
+                        // In normal mode, discard race duplicates (comparison mode keeps all)
+                        if !self.compareSourcesMode && completedKeys.contains(dateKey) {
+                            log.info("\(dateKey): \(sourceID.rawValue.uppercased()) race duplicate, discarded")
+                            freeSlots.append(slot)
+                            sourceLatencies[sourceID, default: []].append(seconds)
+                            sourceInFlight[sourceID, default: 0] -= 1
+                            sourceCompleteCounts[sourceID, default: 0] += 1
+                        } else {
+                            if let f = frame {
+                                newFrames.append(f)
+                                if !self.compareSourcesMode { completedKeys.insert(dateKey) }
+                            }
+                            processedCount += 1
+                            progress = Double(processedCount) / Double(totalItems)
+                            progressMessage = "Reading imagery \(processedCount)/\(totalItems)..."
+                            if slot < sourceProgresses.count {
+                                sourceProgresses[slot].completedItems += 1
+                            }
+                            freeSlots.append(slot)
+                            sourceLatencies[sourceID, default: []].append(seconds)
+                            sourceInFlight[sourceID, default: 0] -= 1
+                            sourceCompleteCounts[sourceID, default: 0] += 1
                         }
-                        freeSlots.append(slot)
-                        sourceLatencies[sourceID, default: []].append(seconds)
-                        sourceInFlight[sourceID, default: 0] -= 1
-                        sourceCompleteCounts[sourceID, default: 0] += 1
 
                     case .httpFailed(let dateKey, let failedSrc, let code, let slot, let seconds):
-                        processedCount += 1
-                        progress = Double(processedCount) / Double(totalItems)
-                        if slot < sourceProgresses.count {
-                            sourceProgresses[slot].completedItems += 1
-                        }
-                        freeSlots.append(slot)
-                        sourceLatencies[failedSrc, default: []].append(seconds)
-                        sourceInFlight[failedSrc, default: 0] -= 1
-
-                        httpErrorCount += 1
-                        if self.compareSourcesMode {
-                            // In comparison mode, just skip failed sources — don't retry
-                            let reason = code > 0 ? "HTTP \(code)" : "failed"
-                            log.warn("\(dateKey): \(failedSrc.rawValue.uppercased()) \(reason), skipped (comparison mode)")
-                        } else if let alts = candidatesByKey[dateKey],
-                           alts.contains(where: { $0.1.sourceID != failedSrc }) {
-                            let reason = code > 0 ? "HTTP \(code)" : "failed"
-                            log.warn("\(dateKey): \(failedSrc.rawValue.uppercased()) \(reason), will retry from alternate")
-                            retryQueue.append((key: dateKey, excludeSource: failedSrc))
-                            totalItems += 1
-                        } else if code == 0 {
-                            log.warn("\(dateKey): \(failedSrc.rawValue.uppercased()) failed, no alternate available")
-                        }
-                        if code == 403 {
-                            if httpErrorCount == 1 {
-                                if failedSrc == .earthdata {
-                                    log.warn("Earthdata 403: check credentials and EULA at https://urs.earthdata.nasa.gov/profile")
-                                } else {
-                                    log.warn("\(failedSrc.rawValue.uppercased()) 403: access denied — check credentials")
-                                }
+                        inFlightKeys[dateKey, default: 0] -= 1
+                        if !self.compareSourcesMode && completedKeys.contains(dateKey) {
+                            // Race loser failed — key already done, just free slot
+                            freeSlots.append(slot)
+                            sourceLatencies[failedSrc, default: []].append(seconds)
+                            sourceInFlight[failedSrc, default: 0] -= 1
+                        } else {
+                            processedCount += 1
+                            progress = Double(processedCount) / Double(totalItems)
+                            if slot < sourceProgresses.count {
+                                sourceProgresses[slot].completedItems += 1
                             }
-                            if httpErrorCount == 5 {
-                                currentMaxConc = max(2, currentMaxConc / 2)
-                                log.warn("Rate limiting (\(httpErrorCount) x 403) — reducing to \(currentMaxConc) streams")
+                            freeSlots.append(slot)
+                            sourceLatencies[failedSrc, default: []].append(seconds)
+                            sourceInFlight[failedSrc, default: 0] -= 1
+
+                            httpErrorCount += 1
+                            if self.compareSourcesMode {
+                                let reason = code > 0 ? "HTTP \(code)" : "failed"
+                                log.warn("\(dateKey): \(failedSrc.rawValue.uppercased()) \(reason), skipped (comparison mode)")
+                            } else if let alts = candidatesByKey[dateKey],
+                               alts.contains(where: { $0.1.sourceID != failedSrc }) {
+                                let reason = code > 0 ? "HTTP \(code)" : "failed"
+                                log.warn("\(dateKey): \(failedSrc.rawValue.uppercased()) \(reason), will retry from alternate")
+                                retryQueue.append((key: dateKey, excludeSource: failedSrc))
+                                totalItems += 1
+                            } else if code == 0 {
+                                log.warn("\(dateKey): \(failedSrc.rawValue.uppercased()) failed, no alternate available")
+                            }
+                            if code == 403 {
+                                if httpErrorCount == 1 {
+                                    if failedSrc == .earthdata {
+                                        log.warn("Earthdata 403: check credentials and EULA at https://urs.earthdata.nasa.gov/profile")
+                                    } else {
+                                        log.warn("\(failedSrc.rawValue.uppercased()) 403: access denied — check credentials")
+                                    }
+                                }
+                                if httpErrorCount == 5 {
+                                    currentMaxConc = max(2, currentMaxConc / 2)
+                                    log.warn("Rate limiting (\(httpErrorCount) x 403) — reducing to \(currentMaxConc) streams")
+                                }
                             }
                         }
                     }
@@ -390,6 +422,8 @@ class NDVIProcessor {
                         }
 
                         sourceInFlight[cfg.sourceID, default: 0] += 1
+                        inFlightKeys[key, default: 0] += 1
+                        keySourcesUsed[key, default: []].insert(cfg.sourceID)
                         let dateKey = key
                         let slot = freeSlots.isEmpty ? nextSlot : freeSlots.removeFirst()
                         if freeSlots.isEmpty && nextSlot < maxConc { nextSlot += 1 }
@@ -428,20 +462,105 @@ class NDVIProcessor {
                                         vegetationIndex: capturedVegetationIndex
                                     )
                                 }
-                                return .success(frame, slot, cfg.sourceID, CFAbsoluteTimeGetCurrent() - t0)
+                                return .success(frame, slot, cfg.sourceID, CFAbsoluteTimeGetCurrent() - t0, dateKey)
                             } catch let err as COGError {
                                 let elapsed = CFAbsoluteTimeGetCurrent() - t0
                                 if case .httpError(let code) = err {
                                     return .httpFailed(dateKey, cfg.sourceID, code, slot, elapsed)
                                 }
-                                // Any COG error → retry from alternate source
                                 return .httpFailed(dateKey, cfg.sourceID, 0, slot, elapsed)
                             } catch {
-                                // Any other error → retry from alternate source
                                 return .httpFailed(dateKey, cfg.sourceID, 0, slot, CFAbsoluteTimeGetCurrent() - t0)
                             }
                         }
                         running += 1
+                    }
+                }
+
+                // Race phase (normal mode only): use idle slots to race slow in-flight items
+                if !self.compareSourcesMode {
+                    var racedKeys = Set<String>()
+
+                    while running > 0 {
+                        if self.isCancelled { group.cancelAll(); break }
+
+                        // Launch races while slots are free
+                        while running < currentMaxConc {
+                            // Find an in-flight key not yet completed or raced, with alternate sources
+                            guard let raceKey = inFlightKeys.first(where: {
+                                $0.value > 0 && !completedKeys.contains($0.key) && !racedKeys.contains($0.key)
+                            })?.key,
+                            let candidates = candidatesByKey[raceKey] else { break }
+
+                            let usedSources = keySourcesUsed[raceKey] ?? []
+                            let altCandidates = candidates.filter { !usedSources.contains($0.1.sourceID) }
+                            guard !altCandidates.isEmpty else {
+                                racedKeys.insert(raceKey)
+                                continue
+                            }
+
+                            racedKeys.insert(raceKey)
+                            let (item, cfg) = pickBestSource(from: altCandidates)
+                            sourceInFlight[cfg.sourceID, default: 0] += 1
+                            inFlightKeys[raceKey, default: 0] += 1
+                            keySourcesUsed[raceKey, default: []].insert(cfg.sourceID)
+
+                            let slot = freeSlots.isEmpty ? nextSlot : freeSlots.removeFirst()
+                            if freeSlots.isEmpty && nextSlot < maxConc { nextSlot += 1 }
+                            if slot < sourceProgresses.count {
+                                sourceProgresses[slot].currentSource = "\(cfg.shortName)\u{26A1}"
+                            }
+                            log.info("\(raceKey): racing from \(cfg.shortName) (idle slot)")
+
+                            let raceDateKey = raceKey
+                            group.addTask {
+                                let t0 = CFAbsoluteTimeGetCurrent()
+                                do {
+                                    let frame: NDVIFrame?
+                                    if cfg.sourceID == .gee {
+                                        frame = try await self.processGEEItem(
+                                            item: item, geometry: geometry,
+                                            utm: utm, bbox: bbox,
+                                            cloudThreshold: cloudThreshold,
+                                            geeTokenManager: geeTokenManager!,
+                                            displayMode: capturedDisplayMode,
+                                            cloudMask: capturedCloudMask,
+                                            sclValidClasses: capturedSCLValidClasses,
+                                            vegetationIndex: capturedVegetationIndex
+                                        )
+                                    } else {
+                                        frame = try await self.processItem(
+                                            item: item, geometry: geometry,
+                                            utm: utm, bbox: bbox,
+                                            cloudThreshold: cloudThreshold,
+                                            bandMapping: cfg.bandMapping,
+                                            sasTokenManager: sasManagers[cfg.sourceID],
+                                            bearerTokenManager: bearerManagers[cfg.sourceID],
+                                            sourceID: cfg.sourceID,
+                                            collection: cfg.collection,
+                                            displayMode: capturedDisplayMode,
+                                            cloudMask: capturedCloudMask,
+                                            sclValidClasses: capturedSCLValidClasses,
+                                            vegetationIndex: capturedVegetationIndex
+                                        )
+                                    }
+                                    return .success(frame, slot, cfg.sourceID, CFAbsoluteTimeGetCurrent() - t0, raceDateKey)
+                                } catch let err as COGError {
+                                    let elapsed = CFAbsoluteTimeGetCurrent() - t0
+                                    if case .httpError(let code) = err {
+                                        return .httpFailed(raceDateKey, cfg.sourceID, code, slot, elapsed)
+                                    }
+                                    return .httpFailed(raceDateKey, cfg.sourceID, 0, slot, elapsed)
+                                } catch {
+                                    return .httpFailed(raceDateKey, cfg.sourceID, 0, slot, CFAbsoluteTimeGetCurrent() - t0)
+                                }
+                            }
+                            running += 1
+                        }
+
+                        // Wait for next result
+                        guard let result = await group.next() else { break }
+                        handleResult(result)
                     }
                 }
 
@@ -467,6 +586,8 @@ class NDVIProcessor {
 
                     let (item, cfg) = pickBestSource(from: candidates)
                     sourceInFlight[cfg.sourceID, default: 0] += 1
+                    inFlightKeys[retry.key, default: 0] += 1
+                    let retryDateKey = retry.key
                     let slot = freeSlots.isEmpty ? nextSlot : freeSlots.removeFirst()
                     if freeSlots.isEmpty && nextSlot < maxConc { nextSlot += 1 }
                     if slot < sourceProgresses.count {
@@ -504,9 +625,9 @@ class NDVIProcessor {
                                     vegetationIndex: capturedVegetationIndex
                                 )
                             }
-                            return .success(frame, slot, cfg.sourceID, CFAbsoluteTimeGetCurrent() - t0)
+                            return .success(frame, slot, cfg.sourceID, CFAbsoluteTimeGetCurrent() - t0, retryDateKey)
                         } catch {
-                            return .success(nil, slot, cfg.sourceID, CFAbsoluteTimeGetCurrent() - t0)
+                            return .success(nil, slot, cfg.sourceID, CFAbsoluteTimeGetCurrent() - t0, retryDateKey)
                         }
                     }
                     running += 1
@@ -539,8 +660,25 @@ class NDVIProcessor {
 
             // Assemble comparison pairs — all pairwise source combinations per date
             if compareSourcesMode {
+                // Find sources that returned at least one frame
+                var sourceFrameCounts = [SourceID: Int]()
+                for f in frames {
+                    if let sid = f.sourceID { sourceFrameCounts[sid, default: 0] += 1 }
+                }
+                // Exclude sources that failed for ALL samples
+                let failedSources = enabledSources.map(\.sourceID).filter { sourceFrameCounts[$0, default: 0] == 0 }
+                if !failedSources.isEmpty {
+                    for fs in failedSources {
+                        log.warn("\(fs.rawValue.uppercased()): 0 frames returned — excluded from comparison")
+                    }
+                }
+
                 var pairsByDate = [String: [NDVIFrame]]()
-                for f in frames { pairsByDate[f.dateString, default: []].append(f) }
+                for f in frames {
+                    // Skip frames from sources that had zero successes (shouldn't exist, but guard)
+                    if let sid = f.sourceID, failedSources.contains(sid) { continue }
+                    pairsByDate[f.dateString, default: []].append(f)
+                }
                 comparisonPairs = []
                 for (dateStr, dateFrames) in pairsByDate.sorted(by: { $0.key < $1.key }) {
                     // Generate all pairwise combinations (skip same-source pairs)
@@ -1067,9 +1205,14 @@ class NDVIProcessor {
             }
 
             // Compute VI — only SCL mask applied (no DN/reflectance filtering)
-            // Per-item DN offset: AWS applies BOA offset to pixels (dnOffset=0),
-            // PC serves raw ESA DNs where PB >= 04.00 has +1000 (dnOffset=-1000)
-            let dnOffset = item.dnOffset
+            // DN offset by source: AWS always pre-applies the BOA offset → 0.
+            // PC/CDSE serve raw ESA DNs where PB >= 04.00 has +1000 → -1000.
+            let dnOffset: Float
+            if sourceID == .aws {
+                dnOffset = 0  // AWS earth-search always applies BOA offset
+            } else {
+                dnOffset = item.dnOffset
+            }
             if dnOffset != 0 {
                 log.info("\(dateStr) [\(srcName)]: applying DN offset \(Int(dnOffset)) (PB=\(item.properties.processingBaseline ?? "?"))")
             }
