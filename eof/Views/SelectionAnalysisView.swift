@@ -299,20 +299,22 @@ struct SelectionAnalysisView: View {
     private func fitParameterRow(_ fit: DLParams) -> some View {
         HStack(spacing: 6) {
             paramLabel("mn", fit.mn, "%.2f")
-            paramLabel("mx", fit.mx, "%.2f")
+            paramLabel("amp", fit.delta, "%.2f")
             paramLabel("sos", fit.sos, "%.0f")
             paramLabel("rsp", fit.rsp, "%.3f")
-            paramLabel("eos", fit.eos, "%.0f")
+            paramLabel("len", fit.seasonLength, "%.0f")
             paramLabel("rau", fit.rau, "%.3f")
+            paramLabel("mx", fit.mx, "%.2f", color: .secondary)
+            paramLabel("eos", fit.eos, "%.0f", color: .secondary)
             Text("RMSE \(String(format: "%.4f", fit.rmse))")
                 .font(.system(size: 7).monospacedDigit())
                 .foregroundStyle(.orange)
         }
     }
 
-    private func paramLabel(_ name: String, _ value: Double, _ fmt: String) -> some View {
+    private func paramLabel(_ name: String, _ value: Double, _ fmt: String, color: Color = .yellow) -> some View {
         VStack(spacing: 0) {
-            Text(name).font(.system(size: 7).bold()).foregroundStyle(.yellow)
+            Text(name).font(.system(size: 7).bold()).foregroundStyle(color)
             Text(String(format: fmt, value)).font(.system(size: 7).monospacedDigit()).foregroundStyle(.secondary)
         }
     }
@@ -381,9 +383,9 @@ struct SelectionAnalysisView: View {
             )
         }
 
-        let paramNames = ["mn", "mx", "sos", "rsp", "eos", "rau"]
+        let paramNames = ["mn", "\u{0394}", "sos", "rsp", "len", "rau"]
         let extractors: [(DLParams) -> Double] = [
-            { $0.mn }, { $0.mx }, { $0.sos }, { $0.rsp }, { $0.eos }, { $0.rau }
+            { $0.mn }, { $0.delta }, { $0.sos }, { $0.rsp }, { $0.seasonLength }, { $0.rau }
         ]
         let formats = ["%.3f", "%.3f", "%.1f", "%.4f", "%.1f", "%.4f"]
 

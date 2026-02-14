@@ -200,7 +200,7 @@ struct SettingsView: View {
                             value: $settings.minSeasonLength, in: 10...200, step: 10)
                     Stepper("Max Season Length: \(settings.maxSeasonLength) days",
                             value: $settings.maxSeasonLength, in: 100...365, step: 10)
-                    Text("Per-pixel fitting uses median fit as starting point. Higher perturbation explores more but is slower. Cluster filter threshold controls outlier sensitivity — lower values are stricter. Spatial regularization rescues isolated outliers with good neighbors. Season length constraints limit EOS − SOS.")
+                    Text("Per-pixel fitting uses median fit as starting point. Higher perturbation explores more but is slower. Cluster filter threshold controls outlier sensitivity — lower values are stricter. Spatial regularization rescues isolated outliers with good neighbors. Season length is optimized directly as a parameter (not inferred from EOS\u{2212}SOS).")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -528,7 +528,7 @@ struct BandInfoView: View {
             }
         }
         .chartXScale(domain: 400...2400)
-        .chartYScale(domain: 0...1.1)
+        .chartYScale(domain: 0...1.0)
         .frame(height: 160)
         .overlay(alignment: .bottom) {
             Text("Wavelength (nm)")

@@ -32,6 +32,10 @@ struct NDVIFrame: Identifiable, Codable {
     var pixelBoundsMaxRow: Int?
     /// Which data source provided this frame
     var sourceID: SourceID?
+    /// STAC item ID (scene name)
+    var sceneID: String?
+    /// DN offset for reflectance conversion (0 for AWS, -1000 for PC PB>=04.00)
+    var dnOffset: Float = 0
 
     /// Tuple accessors for compatibility
     var polygonNorm: [(x: Double, y: Double)] {
@@ -76,7 +80,7 @@ struct NDVIFrame: Identifiable, Codable {
         case polygonNormX, polygonNormY
         case greenURL, blueURL
         case pixelBoundsMinCol, pixelBoundsMinRow, pixelBoundsMaxCol, pixelBoundsMaxRow
-        case sourceID
+        case sourceID, sceneID, dnOffset
     }
 
     // Custom encode/decode to handle Float.nan in ndvi array (JSON doesn't support NaN)
@@ -110,6 +114,8 @@ struct NDVIFrame: Identifiable, Codable {
         try container.encodeIfPresent(pixelBoundsMaxCol, forKey: .pixelBoundsMaxCol)
         try container.encodeIfPresent(pixelBoundsMaxRow, forKey: .pixelBoundsMaxRow)
         try container.encodeIfPresent(sourceID, forKey: .sourceID)
+        try container.encodeIfPresent(sceneID, forKey: .sceneID)
+        try container.encode(dnOffset, forKey: .dnOffset)
     }
 
     init(from decoder: Decoder) throws {
@@ -140,6 +146,8 @@ struct NDVIFrame: Identifiable, Codable {
         pixelBoundsMaxCol = try container.decodeIfPresent(Int.self, forKey: .pixelBoundsMaxCol)
         pixelBoundsMaxRow = try container.decodeIfPresent(Int.self, forKey: .pixelBoundsMaxRow)
         sourceID = try container.decodeIfPresent(SourceID.self, forKey: .sourceID)
+        sceneID = try container.decodeIfPresent(String.self, forKey: .sceneID)
+        dnOffset = (try? container.decode(Float.self, forKey: .dnOffset)) ?? 0
     }
 
     /// Convenience init matching the old tuple-based API
@@ -150,7 +158,7 @@ struct NDVIFrame: Identifiable, Codable {
          polygonNorm: [(x: Double, y: Double)] = [],
          greenURL: URL? = nil, blueURL: URL? = nil,
          pixelBounds: (minCol: Int, minRow: Int, maxCol: Int, maxRow: Int)? = nil,
-         sourceID: SourceID? = nil) {
+         sourceID: SourceID? = nil, sceneID: String? = nil, dnOffset: Float = 0) {
         self.id = UUID()
         self.date = date
         self.dateString = dateString
@@ -175,5 +183,7 @@ struct NDVIFrame: Identifiable, Codable {
         self.pixelBoundsMaxCol = pixelBounds?.maxCol
         self.pixelBoundsMaxRow = pixelBounds?.maxRow
         self.sourceID = sourceID
+        self.sceneID = sceneID
+        self.dnOffset = dnOffset
     }
 }

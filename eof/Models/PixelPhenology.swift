@@ -86,9 +86,9 @@ struct PixelPhenologyResult {
         let goodPixels = pixels.flatMap { $0 }.compactMap { $0 }.filter { $0.fitQuality == .good }
         guard goodPixels.count >= 3 else { return [] }
 
-        let names = ["mn", "mx", "sos", "rsp", "eos", "rau"]
+        let names = ["mn", "\u{0394}", "sos", "rsp", "len", "rau"]
         let extractors: [(DLParams) -> Double] = [
-            { $0.mn }, { $0.mx }, { $0.sos }, { $0.rsp }, { $0.eos }, { $0.rau }
+            { $0.mn }, { $0.delta }, { $0.sos }, { $0.rsp }, { $0.seasonLength }, { $0.rau }
         ]
 
         return zip(names, extractors).map { name, extract in
@@ -243,7 +243,7 @@ struct PixelPhenologyResult {
         }
 
         // Step 3: Apply final outlier flags with rejection detail
-        let paramNames = ["mn", "mx", "sos", "rsp", "eos", "rau"]
+        let paramNames = ["mn", "\u{0394}", "sos", "rsp", "len", "rau"]
         var newPixels = pixels
         for row in 0..<height {
             for col in 0..<width {
@@ -286,24 +286,22 @@ struct PixelPhenologyResult {
 /// Phenology parameters that can be mapped spatially.
 enum PhenologyParameter: String, CaseIterable {
     case sos = "SOS"
-    case eos = "EOS"
-    case peakNDVI = "Peak"
+    case seasonLength = "Season"
+    case delta = "Amp"
     case mn = "Min"
     case rsp = "Green-up"
     case rau = "Senescence"
     case rmse = "RMSE"
-    case seasonLength = "Season"
 
     func extract(from p: DLParams) -> Double {
         switch self {
         case .sos: return p.sos
-        case .eos: return p.eos
-        case .peakNDVI: return p.mx
+        case .seasonLength: return p.eos - p.sos
+        case .delta: return p.mx - p.mn
         case .mn: return p.mn
         case .rsp: return p.rsp
         case .rau: return p.rau
         case .rmse: return p.rmse
-        case .seasonLength: return p.eos - p.sos
         }
     }
 }

@@ -29,6 +29,8 @@
 		E10F00000000000000000007 /* SourceProgress.swift in Sources */ = {isa = PBXBuildFile; fileRef = E10F00000000000000000006 /* SourceProgress.swift */; };
 		E10F00000000000000000009 /* SASTokenManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = E10F00000000000000000008 /* SASTokenManager.swift */; };
 		5262175797D2231586B8ABEB /* BearerTokenManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3E12803D5B5C410FC0A11674 /* BearerTokenManager.swift */; };
+		GEE002 /* GEEService.swift in Sources */ = {isa = PBXBuildFile; fileRef = GEE001 /* GEEService.swift */; };
+		GEE004 /* GEETokenManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = GEE003 /* GEETokenManager.swift */; };
 		66A06BA9784EBE5EDFB5150D /* LocationService.swift in Sources */ = {isa = PBXBuildFile; fileRef = FDE2D3C8CC56FE7252B3CC70 /* LocationService.swift */; };
 		E10F0000000000000000000B /* SourceBenchmarkService.swift in Sources */ = {isa = PBXBuildFile; fileRef = E10F0000000000000000000A /* SourceBenchmarkService.swift */; };
 		F10F00000000000000000001 /* DataSourcesView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10F00000000000000000000 /* DataSourcesView.swift */; };
@@ -39,6 +41,7 @@
 		AA0F00000000000000000006 /* PixelDetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0F00000000000000000005 /* PixelDetailView.swift */; };
 		BB0F00000000000000000002 /* ClusterView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0F00000000000000000001 /* ClusterView.swift */; };
 		BB0F00000000000000000004 /* SelectionAnalysisView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0F00000000000000000003 /* SelectionAnalysisView.swift */; };
+		SIG002 /* SigV4Signer.swift in Sources */ = {isa = PBXBuildFile; fileRef = SIG001 /* SigV4Signer.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -65,6 +68,8 @@
 		E10F00000000000000000006 /* SourceProgress.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SourceProgress.swift; sourceTree = "<group>"; };
 		E10F00000000000000000008 /* SASTokenManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SASTokenManager.swift; sourceTree = "<group>"; };
 		3E12803D5B5C410FC0A11674 /* BearerTokenManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BearerTokenManager.swift; sourceTree = "<group>"; };
+		GEE001 /* GEEService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GEEService.swift; sourceTree = "<group>"; };
+		GEE003 /* GEETokenManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GEETokenManager.swift; sourceTree = "<group>"; };
 		FDE2D3C8CC56FE7252B3CC70 /* LocationService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocationService.swift; sourceTree = "<group>"; };
 		E10F0000000000000000000A /* SourceBenchmarkService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SourceBenchmarkService.swift; sourceTree = "<group>"; };
 		F10F00000000000000000000 /* DataSourcesView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DataSourcesView.swift; sourceTree = "<group>"; };
@@ -75,6 +80,7 @@
 		AA0F00000000000000000005 /* PixelDetailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PixelDetailView.swift; sourceTree = "<group>"; };
 		BB0F00000000000000000001 /* ClusterView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClusterView.swift; sourceTree = "<group>"; };
 		BB0F00000000000000000003 /* SelectionAnalysisView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SelectionAnalysisView.swift; sourceTree = "<group>"; };
+		SIG001 /* SigV4Signer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SigV4Signer.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -135,10 +141,13 @@
 				E10F00000000000000000002 /* KeychainService.swift */,
 				E10F00000000000000000008 /* SASTokenManager.swift */,
 				3E12803D5B5C410FC0A11674 /* BearerTokenManager.swift */,
+				GEE001 /* GEEService.swift */,
+				GEE003 /* GEETokenManager.swift */,
 				FDE2D3C8CC56FE7252B3CC70 /* LocationService.swift */,
 				E10F0000000000000000000A /* SourceBenchmarkService.swift */,
 				F10F00000000000000000004 /* DoubleLogistic.swift */,
 				AA0F00000000000000000003 /* PixelPhenologyFitter.swift */,
+				SIG001 /* SigV4Signer.swift */,
 			);
 			path = Services;
 			sourceTree = "<group>";
@@ -265,6 +274,8 @@
 				E10F00000000000000000007 /* SourceProgress.swift in Sources */,
 				E10F00000000000000000009 /* SASTokenManager.swift in Sources */,
 				5262175797D2231586B8ABEB /* BearerTokenManager.swift in Sources */,
+				GEE002 /* GEEService.swift in Sources */,
+				GEE004 /* GEETokenManager.swift in Sources */,
 				66A06BA9784EBE5EDFB5150D /* LocationService.swift in Sources */,
 				E10F0000000000000000000B /* SourceBenchmarkService.swift in Sources */,
 				F10F00000000000000000001 /* DataSourcesView.swift in Sources */,
@@ -275,6 +286,7 @@
 				AA0F00000000000000000006 /* PixelDetailView.swift in Sources */,
 				BB0F00000000000000000002 /* ClusterView.swift in Sources */,
 				BB0F00000000000000000004 /* SelectionAnalysisView.swift in Sources */,
+				SIG002 /* SigV4Signer.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

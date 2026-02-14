@@ -23,17 +23,23 @@ struct DLParams: Codable, Equatable {
         doys.map { evaluate(t: $0) }
     }
 
-    /// Parameter labels for display.
-    static let labels = ["mn", "mx", "sos", "rsp", "eos", "rau"]
+    /// Amplitude (mx - mn).
+    var delta: Double { mx - mn }
 
-    /// As array (for optimizer).
-    var asArray: [Double] {
-        [mn, mx, sos, rsp, eos, rau]
+    /// Season length in days (eos - sos).
+    var seasonLength: Double { eos - sos }
+
+    /// Parameter labels for display (reparameterized).
+    static let labels = ["mn", "amp", "sos", "rsp", "len", "rau"]
+
+    /// As reparameterized array for optimizer: [mn, delta, sos, rsp, seasonLength, rau].
+    var asOptArray: [Double] {
+        [mn, mx - mn, sos, rsp, eos - sos, rau]
     }
 
-    /// From array.
-    static func from(_ a: [Double]) -> DLParams {
-        DLParams(mn: a[0], mx: a[1], sos: a[2], rsp: a[3], eos: a[4], rau: a[5])
+    /// From reparameterized optimizer array.
+    static func fromOpt(_ a: [Double]) -> DLParams {
+        DLParams(mn: a[0], mx: a[0] + a[1], sos: a[2], rsp: a[3], eos: a[2] + a[4], rau: a[5])
     }
 }
 
@@ -115,6 +121,8 @@ enum DoubleLogistic {
     /// Fit using Nelder-Mead simplex optimization with Huber loss.
     /// The optimizer minimizes Huber loss (robust to outliers). RMSE is computed
     /// after convergence for quality reporting.
+    /// Internally optimizes in reparameterized space: [mn, delta, sos, rsp, seasonLength, rau]
+    /// where delta = mx - mn and seasonLength = eos - sos.
     static func fit(
         data: [DataPoint],
         initial: DLParams,
@@ -123,11 +131,11 @@ enum DoubleLogistic {
         maxSeasonLength: Double = 366
     ) -> DLParams {
         let n = 6  // number of parameters
-        let x0 = initial.asArray
+        let x0 = initial.asOptArray  // [mn, delta, sos, rsp, seasonLength, rau]
 
-        // Parameter bounds (for clamping)
-        let lo = [-0.5, 0.0, 1.0, 0.02, 100.0, 0.02]
-        let hi = [0.8, 1.0, 250.0, 0.6, 366.0, 0.6]
+        // Bounds in reparameterized space
+        let lo = [-0.5, 0.05, 1.0, 0.02, max(minSeasonLength, 10), 0.02]
+        let hi = [0.8, 1.5, 365.0, 0.6, min(maxSeasonLength, 350), 0.6]
 
         func clamp(_ x: [Double]) -> [Double] {
             var c = x
@@ -138,22 +146,14 @@ enum DoubleLogistic {
         }
 
         func cost(_ x: [Double]) -> Double {
-            let p = DLParams.from(clamp(x))
-            var c = huberLoss(params: p, data: data)
-            // Penalise season lengths outside allowed range
-            let seasonLen = p.eos - p.sos
-            if seasonLen < minSeasonLength {
-                c += (minSeasonLength - seasonLen) * 0.01
-            } else if seasonLen > maxSeasonLength {
-                c += (seasonLen - maxSeasonLength) * 0.01
-            }
-            return c
+            let p = DLParams.fromOpt(clamp(x))
+            return huberLoss(params: p, data: data)
         }
 
         // Initialize simplex
         var simplex = [[Double]]()
         simplex.append(x0)
-        let scales = [0.1, 0.1, 20.0, 0.02, 20.0, 0.02]
+        let scales = [0.1, 0.1, 20.0, 0.02, 20.0, 0.02]  // [mn, delta, sos, rsp, seasonLen, rau]
         for i in 0..<n {
             var pt = x0
             pt[i] += scales[i]
@@ -219,7 +219,7 @@ enum DoubleLogistic {
             }
         }
 
-        var best = DLParams.from(clamp(simplex[0]))
+        var best = DLParams.fromOpt(clamp(simplex[0]))
         // Enforce mx > mn post-optimization
         if best.mx <= best.mn { best.mx = best.mn + 0.05 }
         best.rmse = rmse(params: best, data: data)  // true RMSE for quality reporting
@@ -311,12 +311,12 @@ enum DoubleLogistic {
                 perturbed.rsp += guess.rsp * Double.random(in: -sp...sp)
                 perturbed.eos += guess.eos * Double.random(in: -p...p)
                 perturbed.rau += guess.rau * Double.random(in: -sp...sp)
-                // Clamp to physical bounds
+                // Clamp to physical bounds (SOS widened to full year)
                 perturbed.mn = max(-0.5, min(0.8, perturbed.mn))
-                perturbed.mx = max(0.0, min(1.0, perturbed.mx))
-                perturbed.sos = max(1, min(250, perturbed.sos))
+                perturbed.mx = max(0.0, min(1.5, perturbed.mx))
+                perturbed.sos = max(1, min(365, perturbed.sos))
                 perturbed.rsp = max(0.02, min(0.6, perturbed.rsp))
-                perturbed.eos = max(100, min(366, perturbed.eos))
+                perturbed.eos = max(perturbed.sos + minSeasonLength, min(perturbed.sos + maxSeasonLength, perturbed.eos))
                 perturbed.rau = max(0.02, min(0.6, perturbed.rau))
                 // Enforce mx > mn
                 if perturbed.mx <= perturbed.mn {
@@ -365,12 +365,12 @@ enum DoubleLogistic {
             perturbed.rsp += medianParams.rsp * Double.random(in: -sp...sp)
             perturbed.eos += medianParams.eos * Double.random(in: -p...p)
             perturbed.rau += medianParams.rau * Double.random(in: -sp...sp)
-            // Clamp to bounds
+            // Clamp to bounds (SOS widened to full year)
             perturbed.mn  = max(-0.5, min(0.8, perturbed.mn))
-            perturbed.mx  = max(0.0, min(1.0, perturbed.mx))
-            perturbed.sos = max(1, min(250, perturbed.sos))
+            perturbed.mx  = max(0.0, min(1.5, perturbed.mx))
+            perturbed.sos = max(1, min(365, perturbed.sos))
             perturbed.rsp = max(0.08, min(0.6, perturbed.rsp))
-            perturbed.eos = max(100, min(366, perturbed.eos))
+            perturbed.eos = max(perturbed.sos + settings.minSeasonLength, min(perturbed.sos + settings.maxSeasonLength, perturbed.eos))
             perturbed.rau = max(0.08, min(0.6, perturbed.rau))
             // Enforce mx > mn
             if perturbed.mx <= perturbed.mn {

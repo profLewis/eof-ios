@@ -43,8 +43,11 @@ struct ContentView: View {
     @State private var selectionStart: CGPoint?
     @State private var selectionEnd: CGPoint?
     @State private var selectionItem: SelectionItem?
-    // Zoom
-    @State private var imageZoomScale: CGFloat = 1.0
+    // Zoom + pan
+    @State private var zoomScale: CGFloat = 1.0
+    @GestureState private var gestureZoom: CGFloat = 1.0
+    @State private var panOffset: CGSize = .zero
+    @State private var dragLastTranslation: CGSize?
 
     struct SelectionItem: Identifiable {
         let id = UUID()
@@ -76,6 +79,7 @@ struct ContentView: View {
                     startFetch()
                 }
             }
+            .task { await prefetchSASToken() }
             .onChange(of: processor.status) {
                 // Auto-play when loading finishes
                 if processor.status == .done && !processor.frames.isEmpty && !isPlaying {
@@ -347,92 +351,39 @@ struct ContentView: View {
 
                     GeometryReader { geo in
                         let fitScale = max(1, min(8, geo.size.width / CGFloat(frame.width)))
-                        NDVIMapView(frame: frame, scale: fitScale, showPolygon: true, showColorBar: true,
-                                    displayMode: settings.displayMode,
-                                    cloudMask: settings.cloudMask,
-                                    ndviThreshold: settings.ndviThreshold,
-                                    sclValidClasses: settings.sclValidClasses,
-                                    showSCLBoundaries: phenologyDisplayParam == nil && !showBadData && settings.showSCLBoundaries,
-                                    enforceAOI: settings.enforceAOI,
-                                    showMaskedClassColors: settings.showMaskedClassColors,
-                                    basemapImage: settings.showBasemap ? basemapImage : nil,
-                                    phenologyMap: showData && !showBadData ? currentPhenoMap : nil,
-                                    phenologyParam: showData && !showBadData ? phenologyDisplayParam : nil,
-                                    rejectionMap: showData ? currentRejectionMap : nil)
-                            .clipShape(RoundedRectangle(cornerRadius: 8))
-                            .shadow(radius: 2)
-                            .opacity(showData ? 1.0 : 0.0)
-                            .background {
-                                if !showData, let bm = basemapImage {
-                                    let imgW = CGFloat(frame.width) * fitScale
-                                    Image(decorative: bm, scale: CGFloat(bm.width) / imgW)
-                                        .interpolation(.high)
-                                        .clipShape(RoundedRectangle(cornerRadius: 8))
-                                }
-                            }
-                            .scaleEffect(imageZoomScale)
-                        .gesture(
-                            MagnifyGesture()
-                                .onChanged { value in
-                                    imageZoomScale = max(1.0, min(8.0, value.magnification))
-                                }
-                                .onEnded { value in
-                                    withAnimation(.easeOut(duration: 0.2)) {
-                                        imageZoomScale = max(1.0, min(8.0, value.magnification))
+                        let currentZoom = min(8.0, max(1.0, zoomScale * gestureZoom))
+                        let imageH = CGFloat(frame.height) * fitScale
+
+                        ZStack(alignment: .topLeading) {
+                            // Image layer (transformed)
+                            NDVIMapView(frame: frame, scale: fitScale, showPolygon: true, showColorBar: true,
+                                        displayMode: settings.displayMode,
+                                        cloudMask: settings.cloudMask,
+                                        ndviThreshold: settings.ndviThreshold,
+                                        sclValidClasses: settings.sclValidClasses,
+                                        showSCLBoundaries: phenologyDisplayParam == nil && !showBadData && settings.showSCLBoundaries,
+                                        enforceAOI: settings.enforceAOI,
+                                        showMaskedClassColors: settings.showMaskedClassColors,
+                                        basemapImage: settings.showBasemap ? basemapImage : nil,
+                                        phenologyMap: showData && !showBadData ? currentPhenoMap : nil,
+                                        phenologyParam: showData && !showBadData ? phenologyDisplayParam : nil,
+                                        rejectionMap: showData ? currentRejectionMap : nil)
+                                .clipShape(RoundedRectangle(cornerRadius: 8))
+                                .shadow(radius: 2)
+                                .opacity(showData ? 1.0 : 0.0)
+                                .background {
+                                    if !showData, let bm = basemapImage {
+                                        let imgW = CGFloat(frame.width) * fitScale
+                                        Image(decorative: bm, scale: CGFloat(bm.width) / imgW)
+                                            .interpolation(.high)
+                                            .clipShape(RoundedRectangle(cornerRadius: 8))
                                     }
                                 }
-                        )
-                        .onTapGesture(count: 2) {
-                            withAnimation(.easeInOut(duration: 0.3)) {
-                                imageZoomScale = imageZoomScale > 1.5 ? 1.0 : 3.0
-                            }
-                        }
-                        .contentShape(Rectangle())
-                        .onTapGesture { location in
-                            if showBadData, let pp = pixelPhenology {
-                                // Tap-to-inspect bad pixel
-                                let col = Int(location.x / fitScale)
-                                let row = Int(location.y / fitScale)
-                                if row >= 0, row < pp.height, col >= 0, col < pp.width,
-                                   let px = pp.pixels[row][col] {
-                                    tappedPixelDetail = px
-                                    showingPixelDetail = true
-                                }
-                            } else if isSelectMode {
-                                selectionItem = nil
-                                selectionStart = nil
-                                selectionEnd = nil
-                            } else {
-                                togglePlayback()
-                            }
-                        }
-                        .gesture(
-                            DragGesture(minimumDistance: 5)
-                                .onChanged { value in
-                                    if isSelectMode {
-                                        selectionStart = value.startLocation
-                                        selectionEnd = value.location
-                                    } else {
-                                        stopPlayback()
-                                        let frameCount = processor.frames.count
-                                        guard frameCount > 1 else { return }
-                                        let dragWidth: CGFloat = 300
-                                        let fraction = value.translation.width / dragWidth
-                                        let delta = Int(fraction * CGFloat(frameCount))
-                                        let newIndex = max(0, min(frameCount - 1, dragStartIndex + delta))
-                                        currentFrameIndex = newIndex
-                                    }
-                                }
-                                .onEnded { _ in
-                                    if isSelectMode {
-                                        finalizeSelection(frame: frame, scale: fitScale)
-                                    } else {
-                                        dragStartIndex = currentFrameIndex
-                                    }
-                                }
-                        )
-                        // Selection rectangle overlay
-                        .overlay {
+                                .scaleEffect(currentZoom, anchor: .topLeading)
+                                .offset(panOffset)
+                                .allowsHitTesting(false)
+
+                            // Selection rectangle overlay (in screen coords)
                             if isSelectMode, let s = selectionStart, let e = selectionEnd {
                                 let rect = CGRect(
                                     x: min(s.x, e.x), y: min(s.y, e.y),
@@ -443,8 +394,92 @@ struct ContentView: View {
                                     .background(Color.yellow.opacity(0.15))
                                     .frame(width: rect.width, height: rect.height)
                                     .position(x: rect.midX, y: rect.midY)
+                                    .allowsHitTesting(false)
                             }
+
+                            // Gesture catcher (untransformed, full geo size)
+                            Color.clear
+                                .contentShape(Rectangle())
+                                .gesture(
+                                    MagnifyGesture()
+                                        .updating($gestureZoom) { value, state, _ in
+                                            state = value.magnification
+                                        }
+                                        .onEnded { value in
+                                            let newZoom = min(8.0, max(1.0, zoomScale * value.magnification))
+                                            withAnimation(.easeOut(duration: 0.2)) {
+                                                zoomScale = newZoom
+                                                if newZoom <= 1.0 {
+                                                    panOffset = .zero
+                                                } else {
+                                                    panOffset = clampPan(panOffset, zoom: newZoom, geoSize: geo.size, imageH: imageH)
+                                                }
+                                            }
+                                        }
+                                )
+                                .onTapGesture(count: 2) {
+                                    withAnimation(.easeInOut(duration: 0.3)) {
+                                        if zoomScale > 1.5 {
+                                            zoomScale = 1.0
+                                            panOffset = .zero
+                                        } else {
+                                            zoomScale = 3.0
+                                        }
+                                    }
+                                }
+                                .onTapGesture { location in
+                                    let (col, row) = screenToPixel(location, zoom: currentZoom, pan: panOffset, fitScale: fitScale)
+                                    if showBadData, let pp = pixelPhenology {
+                                        if row >= 0, row < pp.height, col >= 0, col < pp.width,
+                                           let px = pp.pixels[row][col] {
+                                            tappedPixelDetail = px
+                                            showingPixelDetail = true
+                                        }
+                                    } else if isSelectMode {
+                                        selectionItem = nil
+                                        selectionStart = nil
+                                        selectionEnd = nil
+                                    } else {
+                                        togglePlayback()
+                                    }
+                                }
+                                .gesture(
+                                    DragGesture(minimumDistance: 5)
+                                        .onChanged { value in
+                                            if isSelectMode {
+                                                selectionStart = value.startLocation
+                                                selectionEnd = value.location
+                                            } else if currentZoom > 1.05 {
+                                                // Pan when zoomed
+                                                let newOffset = CGSize(
+                                                    width: panOffset.width + value.translation.width - (dragLastTranslation?.width ?? 0),
+                                                    height: panOffset.height + value.translation.height - (dragLastTranslation?.height ?? 0)
+                                                )
+                                                panOffset = clampPan(newOffset, zoom: currentZoom, geoSize: geo.size, imageH: imageH)
+                                                dragLastTranslation = value.translation
+                                            } else {
+                                                // Scrub frames
+                                                stopPlayback()
+                                                let frameCount = processor.frames.count
+                                                guard frameCount > 1 else { return }
+                                                let dragWidth: CGFloat = 300
+                                                let fraction = value.translation.width / dragWidth
+                                                let delta = Int(fraction * CGFloat(frameCount))
+                                                let newIndex = max(0, min(frameCount - 1, dragStartIndex + delta))
+                                                currentFrameIndex = newIndex
+                                            }
+                                        }
+                                        .onEnded { _ in
+                                            if isSelectMode {
+                                                finalizeSelectionZoomed(frame: frame, fitScale: fitScale, zoom: currentZoom, pan: panOffset)
+                                            } else if currentZoom <= 1.05 {
+                                                dragStartIndex = currentFrameIndex
+                                            }
+                                            dragLastTranslation = nil
+                                        }
+                                )
                         }
+                        .clipped()
                         .overlay(alignment: .topTrailing) {
                             Image(systemName: isPlaying ? "pause.fill" : "play.fill")
                                 .font(.caption)
@@ -497,6 +532,25 @@ struct ContentView: View {
                             .padding(6)
                             .opacity(0.7)
                         }
+                        .overlay(alignment: .bottomTrailing) {
+                            if zoomScale > 1.05 || gestureZoom != 1.0 {
+                                let z = min(8.0, max(1.0, zoomScale * gestureZoom))
+                                Button {
+                                    withAnimation(.easeInOut(duration: 0.3)) {
+                                        zoomScale = 1.0
+                                        panOffset = .zero
+                                    }
+                                } label: {
+                                    Text("\(String(format: "%.1f", z))x")
+                                        .font(.system(size: 9).bold().monospacedDigit())
+                                        .padding(.horizontal, 6)
+                                        .padding(.vertical, 3)
+                                        .background(.ultraThinMaterial, in: Capsule())
+                                }
+                                .padding(6)
+                                .opacity(0.8)
+                            }
+                        }
                         .onAppear { dragStartIndex = currentFrameIndex }
                         .onChange(of: currentFrameIndex) { dragStartIndex = currentFrameIndex }
                     }
@@ -543,10 +597,53 @@ struct ContentView: View {
 
     private var viLabel: String { settings.vegetationIndex.rawValue }
 
+    /// Chart y-axis label and value depending on display mode.
+    private var chartLabel: String {
+        switch settings.displayMode {
+        case .ndvi, .fcc, .rcc, .scl: return "Median \(viLabel)"
+        case .bandRed: return "Red (B04)"
+        case .bandNIR: return "NIR (B08)"
+        case .bandGreen: return "Green (B03)"
+        case .bandBlue: return "Blue (B02)"
+        }
+    }
+
+    /// Get the chart y-value for a frame depending on display mode.
+    private func chartValue(for frame: NDVIFrame) -> Double {
+        switch settings.displayMode {
+        case .ndvi, .fcc, .rcc, .scl:
+            return Double(frame.medianNDVI)
+        case .bandRed:
+            return medianReflectance(band: frame.redBand, frame: frame)
+        case .bandNIR:
+            return medianReflectance(band: frame.nirBand, frame: frame)
+        case .bandGreen:
+            return medianReflectance(band: frame.greenBand, frame: frame)
+        case .bandBlue:
+            return medianReflectance(band: frame.blueBand, frame: frame)
+        }
+    }
+
+    private func medianReflectance(band: [[UInt16]]?, frame: NDVIFrame) -> Double {
+        guard let band = band else { return 0 }
+        var vals = [Float]()
+        for row in 0..<min(frame.height, band.count) {
+            for col in 0..<min(frame.width, band[row].count) {
+                if !frame.ndvi[row][col].isNaN {  // only valid pixels
+                    vals.append(Float(band[row][col]) / 10000.0)
+                }
+            }
+        }
+        guard !vals.isEmpty else { return 0 }
+        vals.sort()
+        let mid = vals.count / 2
+        return Double(vals.count % 2 == 0 ? (vals[mid-1] + vals[mid]) / 2 : vals[mid])
+    }
+
     private var ndviChart: some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack {
-                Text("Median \(viLabel)")
+                Text(chartLabel)
                     .font(.caption.bold())
                     .foregroundStyle(.green)
                 if let pp = pixelPhenology, pp.outlierCount > 0 {
@@ -566,7 +663,7 @@ struct ContentView: View {
                 ForEach(sorted) { frame in
                     LineMark(
                         x: .value("Date", frame.date),
-                        y: .value(viLabel, Double(frame.medianNDVI)),
+                        y: .value(viLabel, chartValue(for: frame)),
                         series: .value("Series", viLabel)
                     )
                     .foregroundStyle(.green.opacity(0.6))
@@ -607,7 +704,7 @@ struct ContentView: View {
                 ForEach(sorted) { frame in
                     PointMark(
                         x: .value("Date", frame.date),
-                        y: .value(viLabel, Double(frame.medianNDVI))
+                        y: .value(viLabel, chartValue(for: frame))
                     )
                     .foregroundStyle(.green)
                     .symbolSize(15)
@@ -618,7 +715,7 @@ struct ContentView: View {
                     let current = processor.frames[currentFrameIndex]
                     PointMark(
                         x: .value("Date", current.date),
-                        y: .value(viLabel, Double(current.medianNDVI))
+                        y: .value(viLabel, chartValue(for: current))
                     )
                     .foregroundStyle(.red)
                     .symbolSize(200)
@@ -821,7 +918,7 @@ struct ContentView: View {
         }
 
         // rau: tangent line at EOS showing senescence slope
-        if param == .rau || param == .eos || param == .seasonLength {
+        if param == .rau || param == .seasonLength {
             let eosDoy = max(1, min(365, Int(fit.eos)))
             if let eosDate = cal.date(from: DateComponents(year: year, day: eosDoy)) {
                 if param == .rau {
@@ -854,12 +951,16 @@ struct ContentView: View {
             }
         }
 
-        // Peak NDVI horizontal line
-        if param == .peakNDVI, let first = sorted.first?.date, let last = sorted.last?.date {
-            pts.append(DLCurvePoint(id: "peak_h0", date: first, ndvi: fit.mx,
-                series: "peak-line", color: .primary, style: StrokeStyle(lineWidth: 2)))
-            pts.append(DLCurvePoint(id: "peak_h1", date: last, ndvi: fit.mx,
-                series: "peak-line", color: .primary, style: StrokeStyle(lineWidth: 2)))
+        // Delta (amplitude) — show horizontal lines at mn and mx
+        if param == .delta, let first = sorted.first?.date, let last = sorted.last?.date {
+            pts.append(DLCurvePoint(id: "delta_mn0", date: first, ndvi: fit.mn,
+                series: "mn-line", color: .primary.opacity(0.5), style: StrokeStyle(lineWidth: 1, dash: [4, 2])))
+            pts.append(DLCurvePoint(id: "delta_mn1", date: last, ndvi: fit.mn,
+                series: "mn-line", color: .primary.opacity(0.5), style: StrokeStyle(lineWidth: 1, dash: [4, 2])))
+            pts.append(DLCurvePoint(id: "delta_mx0", date: first, ndvi: fit.mx,
+                series: "mx-line", color: .primary, style: StrokeStyle(lineWidth: 2)))
+            pts.append(DLCurvePoint(id: "delta_mx1", date: last, ndvi: fit.mx,
+                series: "mx-line", color: .primary, style: StrokeStyle(lineWidth: 2)))
         }
 
         // Min NDVI horizontal line
@@ -973,22 +1074,19 @@ struct ContentView: View {
                     .buttonStyle(.bordered)
                     .tint(.purple.opacity(0.7))
 
-                    Toggle("Bad Data", isOn: $showBadData)
-                        .toggleStyle(.button)
-                        .font(.caption)
-                        .tint(.red)
                 }
             }
 
-            // Parameter map selector
+            // Parameter map selector (includes Bad Data option)
             if pixelPhenology != nil {
                 HStack(spacing: 8) {
                     Menu {
                         Button {
                             phenologyDisplayParam = nil
+                            showBadData = false
                             startPlayback()
                         } label: {
-                            if phenologyDisplayParam == nil {
+                            if phenologyDisplayParam == nil && !showBadData {
                                 Label("Live", systemImage: "checkmark")
                             } else {
                                 Text("Live")
@@ -998,20 +1096,33 @@ struct ContentView: View {
                         ForEach(PhenologyParameter.allCases, id: \.self) { param in
                             Button {
                                 phenologyDisplayParam = param
+                                showBadData = false
                                 stopPlayback()
                             } label: {
-                                if phenologyDisplayParam == param {
+                                if phenologyDisplayParam == param && !showBadData {
                                     Label(param.rawValue, systemImage: "checkmark")
                                 } else {
                                     Text(param.rawValue)
                                 }
                             }
                         }
+                        Divider()
+                        Button {
+                            showBadData = true
+                            phenologyDisplayParam = nil
+                            stopPlayback()
+                        } label: {
+                            if showBadData {
+                                Label("Bad Data", systemImage: "checkmark")
+                            } else {
+                                Text("Bad Data")
+                            }
+                        }
                     } label: {
                         HStack(spacing: 4) {
-                            Image(systemName: "map.fill")
+                            Image(systemName: showBadData ? "exclamationmark.triangle.fill" : "map.fill")
                                 .font(.system(size: 9))
-                            Text(phenologyDisplayParam?.rawValue ?? "Live")
+                            Text(showBadData ? "Bad Data" : (phenologyDisplayParam?.rawValue ?? "Live"))
                                 .font(.system(size: 9).bold())
                             Image(systemName: "chevron.up.chevron.down")
                                 .font(.system(size: 7))
@@ -1020,7 +1131,7 @@ struct ContentView: View {
                         .padding(.vertical, 4)
                         .background(.ultraThinMaterial, in: Capsule())
                     }
-                    .tint(phenologyDisplayParam != nil ? .orange : .green)
+                    .tint(showBadData ? .red : (phenologyDisplayParam != nil ? .orange : .green))
                     Spacer()
                 }
             }
@@ -1029,11 +1140,13 @@ struct ContentView: View {
             if let dl = dlBest {
                 HStack(spacing: 8) {
                     dlParamLabel("mn", dl.mn, fmt: "%.2f")
-                    dlParamLabel("mx", dl.mx, fmt: "%.2f")
+                    dlParamLabel("amp", dl.delta, fmt: "%.2f")
                     dlParamLabel("sos", dl.sos, fmt: "%.0f")
                     dlParamLabel("rsp", dl.rsp, fmt: "%.3f")
-                    dlParamLabel("eos", dl.eos, fmt: "%.0f")
+                    dlParamLabel("len", dl.seasonLength, fmt: "%.0f")
                     dlParamLabel("rau", dl.rau, fmt: "%.3f")
+                    dlParamLabel("mx", dl.mx, fmt: "%.2f", color: .secondary)
+                    dlParamLabel("eos", dl.eos, fmt: "%.0f", color: .secondary)
                 }
             }
 
@@ -1041,10 +1154,16 @@ struct ContentView: View {
             if showDLSliders {
                 VStack(spacing: 6) {
                     dlSlider("mn", $dlSliders.mn, range: -0.2...0.5, step: 0.01)
-                    dlSlider("mx", $dlSliders.mx, range: 0.2...1.0, step: 0.01)
-                    dlSlider("sos", $dlSliders.sos, range: 1...250, step: 1)
+                    dlSlider("amp", Binding(
+                        get: { dlSliders.mx - dlSliders.mn },
+                        set: { dlSliders.mx = dlSliders.mn + $0 }
+                    ), range: 0.05...1.2, step: 0.01)
+                    dlSlider("sos", $dlSliders.sos, range: 1...365, step: 1)
                     dlSlider("rsp", $dlSliders.rsp, range: 0.005...0.3, step: 0.005)
-                    dlSlider("eos", $dlSliders.eos, range: 150...366, step: 1)
+                    dlSlider("len", Binding(
+                        get: { dlSliders.eos - dlSliders.sos },
+                        set: { dlSliders.eos = dlSliders.sos + $0 }
+                    ), range: 30...300, step: 1)
                     dlSlider("rau", $dlSliders.rau, range: 0.005...0.3, step: 0.005)
 
                     // Live RMSE for slider values
@@ -1086,11 +1205,11 @@ struct ContentView: View {
         }
     }
 
-    private func dlParamLabel(_ name: String, _ value: Double, fmt: String) -> some View {
+    private func dlParamLabel(_ name: String, _ value: Double, fmt: String, color: Color = .yellow.opacity(0.7)) -> some View {
         VStack(spacing: 1) {
             Text(name)
                 .font(.system(size: 7).bold())
-                .foregroundStyle(.yellow.opacity(0.7))
+                .foregroundStyle(color)
             Text(String(format: fmt, value))
                 .font(.system(size: 8).monospacedDigit())
                 .foregroundStyle(.secondary)
@@ -1117,10 +1236,10 @@ struct ContentView: View {
         let f1 = { (v: Double) in String(format: "%.1f", v) }
         log.info("\(label): \(nRuns) runs, perturbation=\(Int(p*100))%, slope=\(Int(sp*100))%, season=\(Int(minSL))-\(Int(maxSL))d")
         log.info("  mn:  \(f3(base.mn))  * U(\(f3(1-p)), \(f3(1+p))) → [\(f3(base.mn*(1-p))), \(f3(base.mn*(1+p)))]")
-        log.info("  mx:  \(f3(base.mx))  * U(\(f3(1-p)), \(f3(1+p))) → [\(f3(base.mx*(1-p))), \(f3(base.mx*(1+p)))]")
+        log.info("  amp: \(f3(base.delta)) (mx-mn)")
         log.info("  sos: \(f1(base.sos)) * U(\(f3(1-p)), \(f3(1+p))) → [\(f1(base.sos*(1-p))), \(f1(base.sos*(1+p)))]")
         log.info("  rsp: \(f3(base.rsp)) * U(\(f3(1-sp)), \(f3(1+sp))) → [\(f3(base.rsp*(1-sp))), \(f3(base.rsp*(1+sp)))]")
-        log.info("  eos: \(f1(base.eos)) * U(\(f3(1-p)), \(f3(1+p))) → [\(f1(base.eos*(1-p))), \(f1(base.eos*(1+p)))]")
+        log.info("  len: \(f1(base.seasonLength)) (eos-sos)")
         log.info("  rau: \(f3(base.rau)) * U(\(f3(1-sp)), \(f3(1+sp))) → [\(f3(base.rau*(1-sp))), \(f3(base.rau*(1+sp)))]")
     }
 
@@ -1140,14 +1259,64 @@ struct ContentView: View {
         logDistributions(label: "Median DL fit", base: guess, p: p, sp: sp, nRuns: 50, minSL: minSL, maxSL: maxSL)
 
         Task.detached {
-            let result = DoubleLogistic.ensembleFit(data: data,
+            // Stage 1: initial robust fit on all data
+            let initial = DoubleLogistic.ensembleFit(data: data,
                 perturbation: p, slopePerturbation: sp,
                 minSeasonLength: minSL, maxSeasonLength: maxSL)
-            await MainActor.run {
-                dlBest = result.best
-                dlEnsemble = result.ensemble
-                dlSliders = result.best
-                log.success("DL fit: RMSE=\(String(format: "%.4f", result.best.rmse)), \(result.ensemble.count) viable of 50")
+
+            // Stage 2: identify outlier dates using MAD of residuals
+            let residuals = data.map { pt in
+                pt.ndvi - initial.best.evaluate(t: pt.doy)
+            }
+            let sortedAbs = residuals.map { abs($0) }.sorted()
+            let mad = sortedAbs[sortedAbs.count / 2]  // median absolute deviation
+            let threshold = max(0.05, mad * 4.0)  // 4 MADs, floor at 0.05
+
+            var outlierIndices = Set<Int>()
+            for (i, r) in residuals.enumerated() {
+                if abs(r) > threshold {
+                    outlierIndices.insert(i)
+                }
+            }
+
+            if !outlierIndices.isEmpty {
+                // Exclude outliers from fit but DO NOT remove frames from processor
+                let cleanData = data.enumerated().filter { !outlierIndices.contains($0.offset) }.map(\.element)
+
+                await MainActor.run {
+                    let outlierDates = outlierIndices.sorted().map { idx -> String in
+                        let frame = processor.frames[idx]
+                        let src = frame.sourceID?.rawValue.uppercased() ?? "?"
+                        return "\(frame.dateString) [\(src)] (residual=\(String(format: "%.3f", residuals[idx])))"
+                    }
+                    log.warn("Excluded \(outlierIndices.count) outlier date(s) from fit (MAD=\(String(format: "%.3f", mad)), threshold=\(String(format: "%.3f", threshold))):")
+                    for d in outlierDates { log.warn("  \(d)") }
+                }
+
+                guard cleanData.count >= 4 else {
+                    await MainActor.run {
+                        log.error("Too few dates remaining after outlier exclusion")
+                    }
+                    return
+                }
+
+                // Stage 3: refit with clean data
+                let result = DoubleLogistic.ensembleFit(data: cleanData,
+                    perturbation: p, slopePerturbation: sp,
+                    minSeasonLength: minSL, maxSeasonLength: maxSL)
+                await MainActor.run {
+                    dlBest = result.best
+                    dlEnsemble = result.ensemble
+                    dlSliders = result.best
+                    log.success("DL fit (excl. \(outlierIndices.count) outlier): RMSE=\(String(format: "%.4f", result.best.rmse)), \(result.ensemble.count) viable of 50")
+                }
+            } else {
+                await MainActor.run {
+                    dlBest = initial.best
+                    dlEnsemble = initial.ensemble
+                    dlSliders = initial.best
+                    log.success("DL fit: RMSE=\(String(format: "%.4f", initial.best.rmse)), \(initial.ensemble.count) viable of 50, no outliers")
+                }
             }
         }
     }
@@ -1372,6 +1541,28 @@ struct ContentView: View {
 
     // MARK: - Actions
 
+    private func prefetchSASToken() async {
+        let pcSources = settings.sources.filter { $0.assetAuthType == .sasToken && $0.isEnabled }
+        guard !pcSources.isEmpty else { return }
+        let sas = SASTokenManager()
+        for src in pcSources {
+            do {
+                let token = try await sas.getToken(for: src.collection)
+                // Parse expiry from token
+                var expiry = ""
+                for param in token.components(separatedBy: "&") {
+                    if param.hasPrefix("se=") {
+                        expiry = param.dropFirst(3)
+                            .removingPercentEncoding ?? String(param.dropFirst(3))
+                    }
+                }
+                log.info("SAS token [\(src.shortName)]: expires \(expiry)")
+            } catch {
+                log.warn("SAS token [\(src.shortName)]: \(error.localizedDescription)")
+            }
+        }
+    }
+
     private func startFetch() {
         log.clear()
 
@@ -1544,6 +1735,55 @@ struct ContentView: View {
         log.info("Selected \(maxCol - minCol + 1)x\(maxRow - minRow + 1) px, \(validCount) valid")
     }
 
+    // MARK: - Zoom + Pan Helpers
+
+    /// Convert a screen-space point to image pixel coordinates, accounting for zoom + pan.
+    /// The image is rendered at `fitScale` px/pixel, then scaled by `zoom` from top-leading, then offset by `pan`.
+    private func screenToPixel(_ screenPt: CGPoint, zoom: CGFloat, pan: CGSize, fitScale: CGFloat) -> (col: Int, row: Int) {
+        let viewX = (screenPt.x - pan.width) / zoom
+        let viewY = (screenPt.y - pan.height) / zoom
+        return (col: Int(viewX / fitScale), row: Int(viewY / fitScale))
+    }
+
+    /// Finalize a drag selection, converting screen-space rectangle to pixel coordinates via zoom+pan transform.
+    private func finalizeSelectionZoomed(frame: NDVIFrame, fitScale: CGFloat, zoom: CGFloat, pan: CGSize) {
+        guard let s = selectionStart, let e = selectionEnd else { return }
+        let (c0, r0) = screenToPixel(CGPoint(x: min(s.x, e.x), y: min(s.y, e.y)), zoom: zoom, pan: pan, fitScale: fitScale)
+        let (c1, r1) = screenToPixel(CGPoint(x: max(s.x, e.x), y: max(s.y, e.y)), zoom: zoom, pan: pan, fitScale: fitScale)
+        let minCol = max(0, c0), maxCol = min(frame.width - 1, c1)
+        let minRow = max(0, r0), maxRow = min(frame.height - 1, r1)
+
+        guard maxCol > minCol && maxRow > minRow else {
+            log.warn("Selection too small — drag a larger rectangle")
+            selectionStart = nil; selectionEnd = nil
+            return
+        }
+
+        var validCount = 0
+        for row in minRow...maxRow {
+            for col in minCol...maxCol {
+                if !frame.ndvi[row][col].isNaN { validCount += 1 }
+            }
+        }
+        if validCount == 0 {
+            log.warn("No valid pixels in selection (\(maxCol - minCol + 1)x\(maxRow - minRow + 1) px)")
+            selectionStart = nil; selectionEnd = nil
+            return
+        }
+        selectionItem = SelectionItem(minRow: minRow, maxRow: maxRow, minCol: minCol, maxCol: maxCol)
+        log.info("Selected \(maxCol - minCol + 1)x\(maxRow - minRow + 1) px, \(validCount) valid")
+    }
+
+    /// Clamp pan offset so the image stays within the visible area.
+    private func clampPan(_ offset: CGSize, zoom: CGFloat, geoSize: CGSize, imageH: CGFloat) -> CGSize {
+        let maxPanX = max(0, geoSize.width * (zoom - 1))
+        let maxPanY = max(0, imageH * zoom - geoSize.height)  // allow vertical pan if image taller than geo
+        return CGSize(
+            width: min(0, max(-maxPanX, offset.width)),
+            height: min(0, max(-maxPanY, offset.height))
+        )
+    }
+
     @MainActor
     private func copyCurrentFrame(frame: NDVIFrame) {
         let currentPhenoMap: [[Float]]? = phenologyDisplayParam.flatMap { p in
@@ -1600,6 +1840,7 @@ struct LogView: View {
     @State private var log = ActivityLog.shared
     @State private var settings = AppSettings.shared
     @State private var showingImages = false
+    @State private var searchTrigger = 0
     var processor: NDVIProcessor
 
     private let gridColumns = [
@@ -1644,12 +1885,22 @@ struct LogView: View {
                     }
                 }
                 ToolbarItem(placement: .topBarTrailing) {
-                    Button {
-                        isPresented = false
-                    } label: {
-                        Label("Close", systemImage: "xmark.circle.fill")
+                    HStack(spacing: 8) {
+                        if !showingImages {
+                            Button {
+                                searchTrigger += 1
+                            } label: {
+                                Label("Search", systemImage: "magnifyingglass")
+                            }
+                            .buttonStyle(.glass)
+                        }
+                        Button {
+                            isPresented = false
+                        } label: {
+                            Label("Close", systemImage: "xmark.circle.fill")
+                        }
+                        .buttonStyle(.glass)
                     }
-                    .buttonStyle(.glass)
                 }
             }
         }
@@ -1694,7 +1945,7 @@ struct LogView: View {
     // MARK: - Log List
 
     private var logList: some View {
-        LogTextView(entries: log.entries)
+        LogTextView(entries: log.entries, searchTrigger: searchTrigger)
     }
 }
 
@@ -1702,6 +1953,13 @@ struct LogView: View {
 
 struct LogTextView: UIViewRepresentable {
     let entries: [ActivityLog.LogEntry]
+    var searchTrigger: Int = 0
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
+    class Coordinator {
+        weak var textView: UITextView?
+    }
 
     func makeUIView(context: Context) -> UITextView {
         let tv = UITextView()
@@ -1712,6 +1970,8 @@ struct LogTextView: UIViewRepresentable {
         tv.textContainerInset = UIEdgeInsets(top: 8, left: 8, bottom: 8, right: 8)
         tv.showsVerticalScrollIndicator = true
         tv.alwaysBounceVertical = true
+        tv.isFindInteractionEnabled = true
+        context.coordinator.textView = tv
         return tv
     }
 
@@ -1747,6 +2007,13 @@ struct LogTextView: UIViewRepresentable {
         if atBottom && !entries.isEmpty {
             let range = NSRange(location: text.length - 1, length: 1)
             tv.scrollRangeToVisible(range)
+        }
+
+        // Open find navigator when search button tapped
+        if searchTrigger > 0 {
+            DispatchQueue.main.async {
+                tv.findInteraction?.presentFindNavigator(showingReplace: false)
+            }
         }
     }
 }

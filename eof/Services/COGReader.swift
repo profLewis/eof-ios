@@ -1,5 +1,8 @@
 import Foundation
 
+/// Closure that signs a URLRequest in-place (e.g. SigV4 for S3).
+typealias RequestSigner = @Sendable (inout URLRequest) -> Void
+
 /// Reads Cloud Optimized GeoTIFF (COG) files via HTTP range requests.
 /// Supports TIFF and BigTIFF with DEFLATE-compressed UInt16 tiles.
 actor COGReader {
@@ -20,6 +23,11 @@ actor COGReader {
     private static let tagTileOffsets: UInt16 = 324
     private static let tagTileByteCounts: UInt16 = 325
 
+    // GeoTIFF model tags
+    private static let tagModelPixelScale: UInt16 = 33550
+    private static let tagModelTiepoint: UInt16 = 33922
+    private static let tagModelTransformation: UInt16 = 34264
+
     // Compression types
     private static let compressionNone: UInt16 = 1
     private static let compressionDeflate: UInt16 = 8
@@ -27,17 +35,21 @@ actor COGReader {
 
     private let log = ActivityLog.shared
 
+    /// Dedicated URLSession with no caching to prevent cross-source data contamination.
+    private let session: URLSession = {
+        let config = URLSessionConfiguration.ephemeral
+        config.urlCache = nil
+        config.requestCachePolicy = .reloadIgnoringLocalCacheData
+        return URLSession(configuration: config)
+    }()
+
     // MARK: - Public API
 
     /// Read a rectangular region of UInt16 pixels from a COG.
-    func readRegion(url: URL, pixelBounds: (minCol: Int, minRow: Int, maxCol: Int, maxRow: Int), authHeaders: [String: String] = [:]) async throws -> [[UInt16]] {
+    func readRegion(url: URL, pixelBounds: (minCol: Int, minRow: Int, maxCol: Int, maxRow: Int), authHeaders: [String: String] = [:], requestSigner: RequestSigner? = nil) async throws -> [[UInt16]] {
         let headerSize = 131072  // 128KB to capture IFD + tile arrays
-        let headerData = try await fetchRange(url: url, offset: 0, length: headerSize, authHeaders: authHeaders)
+        let headerData = try await fetchRange(url: url, offset: 0, length: headerSize, authHeaders: authHeaders, requestSigner: requestSigner)
         let ifd = try parseFirstIFD(data: headerData)
-
-        // Log IFD info for diagnostics
-        let filename = url.lastPathComponent
-        log.info("COG \(filename): \(ifd.imageWidth)x\(ifd.imageLength) bps=\(ifd.bitsPerSample) comp=\(ifd.compression) pred=\(ifd.predictor) tile=\(ifd.tileWidth)x\(ifd.tileLength)")
 
         let tilesAcross = (ifd.imageWidth + ifd.tileWidth - 1) / ifd.tileWidth
         let minTileCol = max(0, pixelBounds.minCol / ifd.tileWidth)
@@ -50,13 +62,13 @@ actor COGReader {
             url: url, headerData: headerData,
             arrayOffset: ifd.tileOffsetsOffset, count: ifd.tileCount,
             valueSize: ifd.tileOffsetValueSize, isLittleEndian: ifd.isLittleEndian,
-            authHeaders: authHeaders
+            authHeaders: authHeaders, requestSigner: requestSigner
         )
         let byteCounts = try await readTileArray(
             url: url, headerData: headerData,
             arrayOffset: ifd.tileByteCountsOffset, count: ifd.tileCount,
             valueSize: ifd.tileByteCountValueSize, isLittleEndian: ifd.isLittleEndian,
-            authHeaders: authHeaders
+            authHeaders: authHeaders, requestSigner: requestSigner
         )
 
         let outWidth = pixelBounds.maxCol - pixelBounds.minCol
@@ -75,7 +87,7 @@ actor COGReader {
                 let byteCount = byteCounts[tileIndex]
                 guard byteCount > 0 else { continue }
 
-                let tileData = try await fetchRange(url: url, offset: UInt64(offset), length: Int(byteCount), authHeaders: authHeaders)
+                let tileData = try await fetchRange(url: url, offset: UInt64(offset), length: Int(byteCount), authHeaders: authHeaders, requestSigner: requestSigner)
                 let pixels = try decompressTileU16(
                     data: tileData, ifd: ifd
                 )
@@ -102,6 +114,143 @@ actor COGReader {
         }
 
         return result
+    }
+
+    /// Read the GeoTIFF affine transform from the file header (ModelPixelScaleTag + ModelTiepointTag).
+    /// Returns [scaleX, 0, originX, 0, -scaleY, originY] or nil if tags not found.
+    func readGeoTransform(url: URL, authHeaders: [String: String] = [:], requestSigner: RequestSigner? = nil) async throws -> [Double]? {
+        let headerSize = 131072  // 128KB — same as readRegion
+        let headerData = try await fetchRange(url: url, offset: 0, length: headerSize, authHeaders: authHeaders, requestSigner: requestSigner)
+        return parseGeoTransform(data: headerData)
+    }
+
+    private func parseGeoTransform(data: Data) -> [Double]? {
+        guard data.count >= 16 else { return nil }
+
+        let isLittleEndian = data[0] == 0x49 && data[1] == 0x49
+
+        func readU16(_ offset: Int) -> UInt16 {
+            guard offset + 2 <= data.count else { return 0 }
+            let val = data.subdata(in: offset..<offset+2).withUnsafeBytes { $0.load(as: UInt16.self) }
+            return isLittleEndian ? val.littleEndian : val.bigEndian
+        }
+
+        func readU32(_ offset: Int) -> UInt32 {
+            guard offset + 4 <= data.count else { return 0 }
+            let val = data.subdata(in: offset..<offset+4).withUnsafeBytes { $0.load(as: UInt32.self) }
+            return isLittleEndian ? val.littleEndian : val.bigEndian
+        }
+
+        func readU64(_ offset: Int) -> UInt64 {
+            guard offset + 8 <= data.count else { return 0 }
+            let val = data.subdata(in: offset..<offset+8).withUnsafeBytes { $0.load(as: UInt64.self) }
+            return isLittleEndian ? val.littleEndian : val.bigEndian
+        }
+
+        func readF64(_ offset: Int) -> Double {
+            guard offset + 8 <= data.count else { return 0 }
+            let bits = data.subdata(in: offset..<offset+8).withUnsafeBytes { $0.load(as: UInt64.self) }
+            return Double(bitPattern: isLittleEndian ? bits.littleEndian : bits.bigEndian)
+        }
+
+        let magic = readU16(2)
+        let isBigTiff = magic == Self.bigTiffMagic
+
+        var ifdOffset: UInt64
+        if isBigTiff {
+            ifdOffset = readU64(8)
+        } else {
+            guard magic == Self.tiffMagic else { return nil }
+            ifdOffset = UInt64(readU32(4))
+        }
+
+        guard ifdOffset < data.count else { return nil }
+
+        let off = Int(ifdOffset)
+        let entryCount: Int
+        let entryStart: Int
+        if isBigTiff {
+            entryCount = Int(readU64(off))
+            entryStart = off + 8
+        } else {
+            entryCount = Int(readU16(off))
+            entryStart = off + 2
+        }
+
+        let entrySize = isBigTiff ? 20 : 12
+        let inlineBytes = isBigTiff ? 8 : 4
+
+        var pixelScale: [Double]?
+        var tiepoint: [Double]?
+        var modelTransform: [Double]?
+
+        for i in 0..<entryCount {
+            let pos = entryStart + i * entrySize
+            guard pos + entrySize <= data.count else { break }
+
+            let tag = readU16(pos)
+            guard tag == Self.tagModelPixelScale || tag == Self.tagModelTiepoint || tag == Self.tagModelTransformation else {
+                continue
+            }
+
+            let type = readU16(pos + 2)
+            guard type == 12 else { continue }  // Must be DOUBLE
+
+            let count: Int
+            let valueOffset: Int
+            if isBigTiff {
+                count = Int(readU64(pos + 4))
+                valueOffset = pos + 12
+            } else {
+                count = Int(readU32(pos + 4))
+                valueOffset = pos + 8
+            }
+
+            let totalBytes = count * 8
+            let dataOffset: Int
+            if totalBytes <= inlineBytes {
+                dataOffset = valueOffset
+            } else if isBigTiff {
+                dataOffset = Int(readU64(valueOffset))
+            } else {
+                dataOffset = Int(readU32(valueOffset))
+            }
+
+            guard dataOffset >= 0, dataOffset + totalBytes <= data.count else { continue }
+
+            var values = [Double]()
+            values.reserveCapacity(count)
+            for j in 0..<count {
+                values.append(readF64(dataOffset + j * 8))
+            }
+
+            switch tag {
+            case Self.tagModelPixelScale:
+                pixelScale = values   // [scaleX, scaleY, scaleZ]
+            case Self.tagModelTiepoint:
+                tiepoint = values     // [I, J, K, X, Y, Z]
+            case Self.tagModelTransformation:
+                modelTransform = values  // 4x4 affine matrix (16 elements)
+            default: break
+            }
+        }
+
+        // Prefer ModelTransformationTag (34264) — 4x4 affine matrix
+        if let mt = modelTransform, mt.count >= 8 {
+            return [mt[0], mt[1], mt[3], mt[4], mt[5], mt[7]]
+        }
+
+        // Construct from ModelPixelScaleTag + ModelTiepointTag
+        if let scale = pixelScale, scale.count >= 2,
+           let tp = tiepoint, tp.count >= 6 {
+            let scaleX = scale[0]
+            let scaleY = scale[1]
+            let originX = tp[3] - tp[0] * scaleX
+            let originY = tp[4] + tp[1] * scaleY
+            return [scaleX, 0, originX, 0, -scaleY, originY]
+        }
+
+        return nil
     }
 
     // MARK: - IFD Parsing
@@ -306,7 +455,7 @@ actor COGReader {
     private func readTileArray(
         url: URL, headerData: Data,
         arrayOffset: UInt64, count: Int, valueSize: Int, isLittleEndian: Bool,
-        authHeaders: [String: String] = [:]
+        authHeaders: [String: String] = [:], requestSigner: RequestSigner? = nil
     ) async throws -> [UInt64] {
         let totalBytes = count * valueSize
         let offset = Int(arrayOffset)
@@ -315,7 +464,7 @@ actor COGReader {
         if offset + totalBytes <= headerData.count {
             arrayData = headerData.subdata(in: offset..<offset + totalBytes)
         } else {
-            arrayData = try await fetchRange(url: url, offset: arrayOffset, length: totalBytes, authHeaders: authHeaders)
+            arrayData = try await fetchRange(url: url, offset: arrayOffset, length: totalBytes, authHeaders: authHeaders, requestSigner: requestSigner)
         }
 
         var result = [UInt64]()
@@ -457,15 +606,18 @@ actor COGReader {
 
     // MARK: - HTTP Range Requests
 
-    private func fetchRange(url: URL, offset: UInt64, length: Int, authHeaders: [String: String] = [:]) async throws -> Data {
+    private func fetchRange(url: URL, offset: UInt64, length: Int, authHeaders: [String: String] = [:], requestSigner: RequestSigner? = nil) async throws -> Data {
         var request = URLRequest(url: url)
+        request.httpMethod = "GET"
         request.setValue("bytes=\(offset)-\(offset + UInt64(length) - 1)", forHTTPHeaderField: "Range")
         request.timeoutInterval = 30
         for (key, value) in authHeaders {
             request.setValue(value, forHTTPHeaderField: key)
         }
+        // Apply request signer (e.g. SigV4 for S3) — must be after all headers are set
+        requestSigner?(&request)
 
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await session.data(for: request)
 
         if let httpResponse = response as? HTTPURLResponse {
             guard (200...299).contains(httpResponse.statusCode) else {
@@ -484,6 +636,7 @@ enum COGError: Error, LocalizedError {
     case unsupportedCompression(Int)
     case decompressionFailed
     case httpError(Int)
+    case missingTransform
 
     var errorDescription: String? {
         switch self {
@@ -491,6 +644,7 @@ enum COGError: Error, LocalizedError {
         case .unsupportedCompression(let c): return "Unsupported compression: \(c)"
         case .decompressionFailed: return "DEFLATE decompression failed"
         case .httpError(let code): return "HTTP error \(code)"
+        case .missingTransform: return "Missing proj:transform (no STAC metadata or COG header)"
         }
     }
 }

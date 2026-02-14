@@ -217,7 +217,7 @@ struct PixelDetailView: View {
             Text("Parameters (pixel vs median)")
                 .font(.caption.bold())
             HStack(spacing: 0) {
-                ForEach(["", "mn", "mx", "sos", "rsp", "eos", "rau"], id: \.self) { label in
+                ForEach(["", "mn", "amp", "sos", "rsp", "len", "rau", "mx", "eos"], id: \.self) { label in
                     Text(label.isEmpty ? "" : label)
                         .font(.system(size: 8).bold())
                         .frame(maxWidth: .infinity)
@@ -230,11 +230,13 @@ struct PixelDetailView: View {
                     .frame(maxWidth: .infinity)
                     .foregroundStyle(.secondary)
                 paramCell(pixel.mn, "%.2f")
-                paramCell(pixel.mx, "%.2f")
+                paramCell(pixel.delta, "%.2f")
                 paramCell(pixel.sos, "%.0f")
                 paramCell(pixel.rsp, "%.3f")
-                paramCell(pixel.eos, "%.0f")
+                paramCell(pixel.seasonLength, "%.0f")
                 paramCell(pixel.rau, "%.3f")
+                paramCell(pixel.mx, "%.2f")
+                paramCell(pixel.eos, "%.0f")
             }
             HStack(spacing: 0) {
                 Text("Med")
@@ -242,11 +244,13 @@ struct PixelDetailView: View {
                     .frame(maxWidth: .infinity)
                     .foregroundStyle(.secondary)
                 paramCell(median.mn, "%.2f")
-                paramCell(median.mx, "%.2f")
+                paramCell(median.delta, "%.2f")
                 paramCell(median.sos, "%.0f")
                 paramCell(median.rsp, "%.3f")
-                paramCell(median.eos, "%.0f")
+                paramCell(median.seasonLength, "%.0f")
                 paramCell(median.rau, "%.3f")
+                paramCell(median.mx, "%.2f")
+                paramCell(median.eos, "%.0f")
             }
         }
     }

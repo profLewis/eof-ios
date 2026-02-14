@@ -67,7 +67,7 @@ class AppSettings {
     var pixelMinObservations: Int = 4 { didSet { save() } }
     var pixelSlopePerturbation: Double = 0.10 { didSet { save() } }
     var clusterFilterThreshold: Double = 4.0 { didSet { save() } }
-    var minSeasonLength: Int = 50 { didSet { save() } }
+    var minSeasonLength: Int = 30 { didSet { save() } }
     var maxSeasonLength: Int = 150 { didSet { save() } }
 
     /// SCL classes to treat as VALID (not masked). User can toggle each.
@@ -90,9 +90,11 @@ class AppSettings {
     ]
 
     // Data Sources (order = trust priority)
-    var sources: [STACSourceConfig] = [.planetaryDefault(), .awsDefault(), .cdseDefault(), .earthdataDefault()]
+    var sources: [STACSourceConfig] = [.planetaryDefault(), .awsDefault(), .cdseDefault(), .earthdataDefault(), .geeDefault()] {
+        didSet { saveSources() }
+    }
     var benchmarkResults: [SourceBenchmark] = []
-    var smartAllocation: Bool = true
+    var smartAllocation: Bool = true { didSet { save() } }
 
     var enabledSources: [STACSourceConfig] {
         sources.filter { $0.isEnabled }
@@ -195,6 +197,13 @@ class AppSettings {
         defaults.set(minSeasonLength, forKey: prefix + "minSeasonLength")
         defaults.set(maxSeasonLength, forKey: prefix + "maxSeasonLength")
         defaults.set(vegetationIndex.rawValue, forKey: prefix + "vegetationIndex")
+        defaults.set(smartAllocation, forKey: prefix + "smartAllocation")
+    }
+
+    private func saveSources() {
+        if let data = try? JSONEncoder().encode(sources) {
+            defaults.set(data, forKey: prefix + "sources")
+        }
     }
 
     private func load() {
@@ -248,6 +257,49 @@ class AppSettings {
         if let viRaw = defaults.string(forKey: prefix + "vegetationIndex"),
            let vi = VegetationIndex(rawValue: viRaw) {
             vegetationIndex = vi
+        }
+        if defaults.object(forKey: prefix + "smartAllocation") != nil {
+            smartAllocation = defaults.bool(forKey: prefix + "smartAllocation")
+        }
+        // Restore data source selections and order
+        if let data = defaults.data(forKey: prefix + "sources"),
+           let saved = try? JSONDecoder().decode([STACSourceConfig].self, from: data) {
+            // Merge: use saved state for known sources, append any new defaults not in saved
+            let allDefaults: [STACSourceConfig] = [.planetaryDefault(), .awsDefault(), .cdseDefault(), .earthdataDefault(), .geeDefault()]
+            var merged = saved
+            for def in allDefaults {
+                if !merged.contains(where: { $0.sourceID == def.sourceID }) {
+                    merged.append(def)
+                }
+            }
+            sources = merged
+        }
+
+        // Auto-enable sources that have credentials stored but are still disabled
+        for i in 0..<sources.count {
+            if !sources[i].isEnabled {
+                switch sources[i].sourceID {
+                case .earthdata:
+                    if let u = KeychainService.retrieve(key: "earthdata.username"),
+                       let p = KeychainService.retrieve(key: "earthdata.password"),
+                       !u.isEmpty, !p.isEmpty {
+                        sources[i].isEnabled = true
+                    }
+                case .cdse:
+                    if let u = KeychainService.retrieve(key: "cdse.username"),
+                       let p = KeychainService.retrieve(key: "cdse.password"),
+                       !u.isEmpty, !p.isEmpty {
+                        sources[i].isEnabled = true
+                    }
+                case .gee:
+                    if KeychainService.retrieve(key: "gee.refresh_token") != nil,
+                       let pid = KeychainService.retrieve(key: "gee.project"),
+                       !pid.isEmpty {
+                        sources[i].isEnabled = true
+                    }
+                default: break
+                }
+            }
         }
     }
 

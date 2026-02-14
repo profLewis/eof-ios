@@ -99,6 +99,8 @@ struct STACService {
             break
         case .aws:
             break
+        case .gee:
+            break  // GEE uses its own search path, not STACService
         }
     }
 

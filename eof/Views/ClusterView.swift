@@ -6,7 +6,7 @@ struct ClusterView: View {
     @Binding var isPresented: Bool
     let result: PixelPhenologyResult
 
-    private let paramNames = ["SOS", "EOS", "Peak", "Min", "rsp", "rau"]
+    private let paramNames = ["SOS", "Season", "Amp", "Min", "rsp", "rau"]
 
     var body: some View {
         NavigationStack {
@@ -92,8 +92,8 @@ struct ClusterView: View {
     private func extractParam(_ index: Int, _ params: DLParams) -> Double {
         switch index {
         case 0: return params.sos
-        case 1: return params.eos
-        case 2: return params.mx
+        case 1: return params.seasonLength
+        case 2: return params.delta
         case 3: return params.mn
         case 4: return params.rsp
         case 5: return params.rau

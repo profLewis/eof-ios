@@ -258,7 +258,7 @@ struct NDVIMapView: View {
         guard minV < maxV else { return nil }
 
         // Clamp peak NDVI and min NDVI display ranges
-        if param == .peakNDVI { maxV = min(maxV, 1.0); minV = max(minV, 0.0) }
+        if param == .delta { maxV = min(maxV, 1.0); minV = max(minV, 0.0) }
         if param == .mn { maxV = min(maxV, 1.0); minV = max(minV, -0.5) }
 
         var pixels = [UInt32](repeating: 0, count: width * height)
@@ -281,7 +281,7 @@ struct NDVIMapView: View {
                                 minV: Float, maxV: Float) -> (UInt8, UInt8, UInt8) {
         let t = max(0, min(1, (value - minV) / (maxV - minV)))
         switch param {
-        case .sos, .eos, .seasonLength:
+        case .sos, .seasonLength:
             // Blue → White → Red (diverging)
             if t < 0.5 {
                 let s = t * 2
@@ -290,7 +290,7 @@ struct NDVIMapView: View {
                 let s = (t - 0.5) * 2
                 return (255, UInt8((1 - s) * 255), UInt8((1 - s) * 255))
             }
-        case .peakNDVI, .mn:
+        case .delta, .mn:
             // Standard NDVI-like green ramp
             return ndviToRGB(t * 0.8 + 0.1)
         case .rsp, .rau:
@@ -559,7 +559,7 @@ struct NDVIMapView: View {
         guard minV < maxV else { return AnyView(EmptyView()) }
 
         // Clamp color bar ranges for NDVI-derived parameters
-        if param == .peakNDVI { maxV = min(maxV, 1.0); minV = max(minV, 0.0) }
+        if param == .delta { maxV = min(maxV, 1.0); minV = max(minV, 0.0) }
         if param == .mn { maxV = min(maxV, 1.0); minV = max(minV, -0.5) }
 
         let barH: CGFloat = max(8, scale * 0.8)

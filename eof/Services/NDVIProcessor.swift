@@ -20,7 +20,6 @@ class NDVIProcessor {
 
     // Constants
     private let quantificationValue: Float = 10000.0
-    private let baselineOffset: Float = 0.0  // AWS/PC S2 L2A data: DN/10000 = reflectance (no offset)
 
     private let log = ActivityLog.shared
     private let settings = AppSettings.shared
@@ -65,6 +64,14 @@ class NDVIProcessor {
                     group.addTask {
                         do {
                             let t0 = CFAbsoluteTimeGetCurrent()
+                            if src.sourceID == .gee {
+                                // GEE probe: verify token and basic API access
+                                let gee = GEETokenManager()
+                                _ = try await gee.getToken()
+                                let searchMs = Int((CFAbsoluteTimeGetCurrent() - t0) * 1000)
+                                return ProbeResult(sourceID: src.sourceID, ok: true, error: nil,
+                                                   searchMs: searchMs, sasMs: nil)
+                            }
                             let stac = STACService(config: src)
                             let items = try await stac.search(
                                 geometry: geometry, startDate: startDate, endDate: endDate
@@ -138,6 +145,17 @@ class NDVIProcessor {
             await withTaskGroup(of: SourceSearchResult?.self) { group in
                 for src in enabledSources {
                     group.addTask {
+                        if src.sourceID == .gee {
+                            let projectID = KeychainService.retrieve(key: "gee.project") ?? ""
+                            guard !projectID.isEmpty else { return nil }
+                            let gee = GEEService(projectID: projectID, tokenManager: GEETokenManager())
+                            if let items = try? await gee.search(
+                                geometry: geometry, startDate: startDate, endDate: endDate
+                            ), !items.isEmpty {
+                                return SourceSearchResult(config: src, items: items)
+                            }
+                            return nil
+                        }
                         let stac = STACService(config: src)
                         if let items = try? await stac.search(
                             geometry: geometry, startDate: startDate, endDate: endDate
@@ -198,7 +216,11 @@ class NDVIProcessor {
             log.info("UTM zone: \(utm.zone)\(utm.isNorth ? "N" : "S") (EPSG:\(utm.epsg))")
 
             // 3. Process items concurrently with per-source tracking
-            let cogReader = COGReader()
+            // Capture settings snapshot to avoid reading shared mutable state from concurrent tasks
+            let capturedDisplayMode = settings.displayMode
+            let capturedCloudMask = settings.cloudMask
+            let capturedSCLValidClasses = settings.sclValidClasses
+            let capturedVegetationIndex = settings.vegetationIndex
             var processedCount = 0
             var newFrames = [NDVIFrame]()
             let maxConc = settings.maxConcurrent
@@ -207,10 +229,12 @@ class NDVIProcessor {
             // Create auth managers per source
             var sasManagers = [SourceID: SASTokenManager]()
             var bearerManagers = [SourceID: BearerTokenManager]()
+            var geeTokenManager: GEETokenManager?
             for src in enabledSources {
                 switch src.assetAuthType {
                 case .sasToken: sasManagers[src.sourceID] = SASTokenManager()
                 case .bearerToken: bearerManagers[src.sourceID] = BearerTokenManager(sourceID: src.sourceID)
+                case .geeOAuth: geeTokenManager = GEETokenManager()
                 case .none: break
                 }
             }
@@ -297,9 +321,18 @@ class NDVIProcessor {
                             retryQueue.append((key: dateKey, excludeSource: failedSrc))
                             totalItems += 1
                         }
-                        if code == 403 && httpErrorCount == 5 {
-                            currentMaxConc = max(2, currentMaxConc / 2)
-                            log.warn("Rate limiting (\(httpErrorCount) x 403) — reducing to \(currentMaxConc) streams")
+                        if code == 403 {
+                            if httpErrorCount == 1 {
+                                if failedSrc == .earthdata {
+                                    log.warn("Earthdata 403: check credentials and EULA at https://urs.earthdata.nasa.gov/profile")
+                                } else {
+                                    log.warn("\(failedSrc.rawValue.uppercased()) 403: access denied — check credentials")
+                                }
+                            }
+                            if httpErrorCount == 5 {
+                                currentMaxConc = max(2, currentMaxConc / 2)
+                                log.warn("Rate limiting (\(httpErrorCount) x 403) — reducing to \(currentMaxConc) streams")
+                            }
                         }
                     }
                     running -= 1
@@ -333,23 +366,45 @@ class NDVIProcessor {
                     group.addTask {
                         let t0 = CFAbsoluteTimeGetCurrent()
                         do {
-                            let frame = try await self.processItem(
-                                item: item, geometry: geometry,
-                                utm: utm, bbox: bbox, cogReader: cogReader,
-                                cloudThreshold: cloudThreshold,
-                                bandMapping: cfg.bandMapping,
-                                sasTokenManager: sasManagers[cfg.sourceID],
-                                bearerTokenManager: bearerManagers[cfg.sourceID],
-                                sourceID: cfg.sourceID,
-                                collection: cfg.collection
-                            )
+                            let frame: NDVIFrame?
+                            if cfg.sourceID == .gee {
+                                frame = try await self.processGEEItem(
+                                    item: item, geometry: geometry,
+                                    utm: utm, bbox: bbox,
+                                    cloudThreshold: cloudThreshold,
+                                    geeTokenManager: geeTokenManager!,
+                                    displayMode: capturedDisplayMode,
+                                    cloudMask: capturedCloudMask,
+                                    sclValidClasses: capturedSCLValidClasses,
+                                    vegetationIndex: capturedVegetationIndex
+                                )
+                            } else {
+                                frame = try await self.processItem(
+                                    item: item, geometry: geometry,
+                                    utm: utm, bbox: bbox,
+                                    cloudThreshold: cloudThreshold,
+                                    bandMapping: cfg.bandMapping,
+                                    sasTokenManager: sasManagers[cfg.sourceID],
+                                    bearerTokenManager: bearerManagers[cfg.sourceID],
+                                    sourceID: cfg.sourceID,
+                                    collection: cfg.collection,
+                                    displayMode: capturedDisplayMode,
+                                    cloudMask: capturedCloudMask,
+                                    sclValidClasses: capturedSCLValidClasses,
+                                    vegetationIndex: capturedVegetationIndex
+                                )
+                            }
                             return .success(frame, slot, cfg.sourceID, CFAbsoluteTimeGetCurrent() - t0)
                         } catch let err as COGError {
                             let elapsed = CFAbsoluteTimeGetCurrent() - t0
-                            if case .httpError(let code) = err {
+                            switch err {
+                            case .httpError(let code):
                                 return .httpFailed(dateKey, cfg.sourceID, code, slot, elapsed)
+                            case .missingTransform:
+                                return .httpFailed(dateKey, cfg.sourceID, 0, slot, elapsed)
+                            default:
+                                return .success(nil, slot, cfg.sourceID, elapsed)
                             }
-                            return .success(nil, slot, cfg.sourceID, elapsed)
                         } catch {
                             return .success(nil, slot, cfg.sourceID, CFAbsoluteTimeGetCurrent() - t0)
                         }
@@ -388,16 +443,34 @@ class NDVIProcessor {
                     group.addTask {
                         let t0 = CFAbsoluteTimeGetCurrent()
                         do {
-                            let frame = try await self.processItem(
-                                item: item, geometry: geometry,
-                                utm: utm, bbox: bbox, cogReader: cogReader,
-                                cloudThreshold: cloudThreshold,
-                                bandMapping: cfg.bandMapping,
-                                sasTokenManager: sasManagers[cfg.sourceID],
-                                bearerTokenManager: bearerManagers[cfg.sourceID],
-                                sourceID: cfg.sourceID,
-                                collection: cfg.collection
-                            )
+                            let frame: NDVIFrame?
+                            if cfg.sourceID == .gee {
+                                frame = try await self.processGEEItem(
+                                    item: item, geometry: geometry,
+                                    utm: utm, bbox: bbox,
+                                    cloudThreshold: cloudThreshold,
+                                    geeTokenManager: geeTokenManager!,
+                                    displayMode: capturedDisplayMode,
+                                    cloudMask: capturedCloudMask,
+                                    sclValidClasses: capturedSCLValidClasses,
+                                    vegetationIndex: capturedVegetationIndex
+                                )
+                            } else {
+                                frame = try await self.processItem(
+                                    item: item, geometry: geometry,
+                                    utm: utm, bbox: bbox,
+                                    cloudThreshold: cloudThreshold,
+                                    bandMapping: cfg.bandMapping,
+                                    sasTokenManager: sasManagers[cfg.sourceID],
+                                    bearerTokenManager: bearerManagers[cfg.sourceID],
+                                    sourceID: cfg.sourceID,
+                                    collection: cfg.collection,
+                                    displayMode: capturedDisplayMode,
+                                    cloudMask: capturedCloudMask,
+                                    sclValidClasses: capturedSCLValidClasses,
+                                    vegetationIndex: capturedVegetationIndex
+                                )
+                            }
                             return .success(frame, slot, cfg.sourceID, CFAbsoluteTimeGetCurrent() - t0)
                         } catch {
                             return .success(nil, slot, cfg.sourceID, CFAbsoluteTimeGetCurrent() - t0)
@@ -452,6 +525,16 @@ class NDVIProcessor {
                     if let peak = frames.map({ $0.medianNDVI }).max() {
                         log.info("Peak median NDVI: \(String(format: "%.3f", peak))")
                     }
+                }
+
+                // Scene summary table
+                log.info("--- Scene Summary ---")
+                for f in frames {
+                    let src = f.sourceID?.rawValue.uppercased() ?? "?"
+                    let scene = f.sceneID ?? f.dateString
+                    let doy = String(format: "%03d", f.dayOfYear)
+                    let med = String(format: "%.3f", f.medianNDVI)
+                    log.info("\(scene) \(f.dateString) DOY=\(doy) nValid=\(f.validPixelCount)/\(f.polyPixelCount) medNDVI=\(med) [\(src)]")
                 }
 
             }
@@ -540,22 +623,36 @@ class NDVIProcessor {
         progress = 0
 
         let sourceConfig = settings.enabledSources.first ?? .awsDefault()
-        let stacService = STACService(config: sourceConfig)
+        let isGEE = sourceConfig.sourceID == .gee
+        let stacService = isGEE ? nil : STACService(config: sourceConfig)
+        let geeService: GEEService? = isGEE ? {
+            let pid = KeychainService.retrieve(key: "gee.project") ?? ""
+            return GEEService(projectID: pid, tokenManager: GEETokenManager())
+        }() : nil
+        let geeToken: GEETokenManager? = isGEE ? GEETokenManager() : nil
         let bandMapping = sourceConfig.bandMapping
         let sasManager: SASTokenManager? = sourceConfig.assetAuthType == .sasToken ? SASTokenManager() : nil
         let utm = UTMProjection.zoneFor(lon: centroid.lon, lat: centroid.lat)
         let bbox = geometry.bbox
-        let cogReader = COGReader()
         let maxConc = settings.maxConcurrent
         let cloudThreshold = settings.cloudThreshold
+        let capturedDisplayMode = settings.displayMode
+        let capturedCloudMask = settings.cloudMask
+        let capturedSCLValidClasses = settings.sclValidClasses
+        let capturedVegetationIndex = settings.vegetationIndex
 
         var allNewItems = [STACItem]()
         for range in fetchRanges {
             log.info("Searching \(range.start) to \(range.end)...")
-            if let items = try? await stacService.search(
-                geometry: geometry, startDate: range.start, endDate: range.end
-            ) {
-                // Skip items we already have
+            let items: [STACItem]?
+            if isGEE, let gee = geeService {
+                items = try? await gee.search(geometry: geometry, startDate: range.start, endDate: range.end)
+            } else if let stac = stacService {
+                items = try? await stac.search(geometry: geometry, startDate: range.start, endDate: range.end)
+            } else {
+                items = nil
+            }
+            if let items {
                 let newItems = items.filter { !existingDates.contains($0.dateString) }
                 allNewItems.append(contentsOf: newItems)
                 log.info("Found \(items.count) scenes (\(newItems.count) new)")
@@ -592,14 +689,30 @@ class NDVIProcessor {
                     }
                 }
                 group.addTask {
-                    try? await self.processItem(
+                    if isGEE, let gt = geeToken {
+                        return try? await self.processGEEItem(
+                            item: item, geometry: geometry,
+                            utm: utm, bbox: bbox,
+                            cloudThreshold: cloudThreshold,
+                            geeTokenManager: gt,
+                            displayMode: capturedDisplayMode,
+                            cloudMask: capturedCloudMask,
+                            sclValidClasses: capturedSCLValidClasses,
+                            vegetationIndex: capturedVegetationIndex
+                        )
+                    }
+                    return try? await self.processItem(
                         item: item, geometry: geometry,
-                        utm: utm, bbox: bbox, cogReader: cogReader,
+                        utm: utm, bbox: bbox,
                         cloudThreshold: cloudThreshold,
                         bandMapping: bandMapping,
                         sasTokenManager: sasManager,
                         sourceID: sourceConfig.sourceID,
-                        collection: sourceConfig.collection
+                        collection: sourceConfig.collection,
+                        displayMode: capturedDisplayMode,
+                        cloudMask: capturedCloudMask,
+                        sclValidClasses: capturedSCLValidClasses,
+                        vegetationIndex: capturedVegetationIndex
                     )
                 }
                 running += 1
@@ -660,16 +773,21 @@ class NDVIProcessor {
         geometry: GeoJSONGeometry,
         utm: UTMProjection,
         bbox: (minLon: Double, minLat: Double, maxLon: Double, maxLat: Double),
-        cogReader: COGReader,
         cloudThreshold: Double,
         bandMapping: BandMapping = BandMapping(red: "red", nir: "nir", green: "green", blue: "blue", scl: "scl", projTransformKey: "red"),
         sasTokenManager: SASTokenManager? = nil,
         bearerTokenManager: BearerTokenManager? = nil,
         sourceID: SourceID? = nil,
-        collection: String = "sentinel-2-l2a"
+        collection: String = "sentinel-2-l2a",
+        displayMode: AppSettings.DisplayMode = .fcc,
+        cloudMask: Bool = true,
+        sclValidClasses: Set<Int> = [4, 5],
+        vegetationIndex: AppSettings.VegetationIndex = .ndvi
     ) async throws -> NDVIFrame? {
         let dateStr = item.dateString
         let srcName = sourceID?.rawValue.uppercased() ?? "?"
+        // Each processItem gets its own COGReader for complete source isolation
+        let cogReader = COGReader()
         do {
             // Get asset URLs using source-specific band keys
             guard let redAsset = item.assets[bandMapping.red],
@@ -708,16 +826,44 @@ class NDVIProcessor {
             }
 
             // Build auth headers for bearer token sources (CDSE, Earthdata)
+            // For CDSE with S3 credentials, use SigV4 signing instead of bearer token
             var authHeaders = [String: String]()
-            if let bearer = bearerTokenManager {
-                authHeaders = (try? await bearer.authHeaders()) ?? [:]
+            var requestSigner: RequestSigner?
+            if sourceID == .cdse,
+               let ak = KeychainService.retrieve(key: "cdse.accesskey"),
+               let sk = KeychainService.retrieve(key: "cdse.secretkey"),
+               !ak.isEmpty, !sk.isEmpty {
+                let signer = SigV4Signer(accessKey: ak, secretKey: sk, region: "default", service: "s3")
+                requestSigner = { request in signer.sign(&request) }
+            } else if let bearer = bearerTokenManager {
+                do {
+                    authHeaders = try await bearer.authHeaders()
+                } catch {
+                    log.warn("\(dateStr) [\(srcName)]: bearer token failed — \(error.localizedDescription)")
+                    return nil
+                }
             }
 
-            // Get projection info from asset
-            guard let transform = item.projTransform(using: bandMapping),
-                  transform.count >= 6 else {
-                log.warn("\(dateStr) [\(srcName)]: missing proj:transform — skipping")
-                return nil
+            // Get projection info from asset (fallback to COG header if STAC metadata lacks it)
+            let transform: [Double]
+            if let stacTransform = item.projTransform(using: bandMapping), stacTransform.count >= 6 {
+                transform = stacTransform
+            } else {
+                do {
+                    if let cogTransform = try await cogReader.readGeoTransform(url: redURL, authHeaders: authHeaders, requestSigner: requestSigner),
+                       cogTransform.count >= 6 {
+                        transform = cogTransform
+                        log.info("\(dateStr) [\(srcName)]: using COG header geo-transform (STAC metadata lacked proj:transform)")
+                    } else {
+                        log.warn("\(dateStr) [\(srcName)]: missing proj:transform in STAC and COG header — will retry from alternate")
+                        throw COGError.missingTransform
+                    }
+                } catch let cogErr as COGError {
+                    throw cogErr
+                } catch {
+                    log.warn("\(dateStr) [\(srcName)]: COG header geo-transform read failed (\(error.localizedDescription)) — will retry from alternate")
+                    throw COGError.missingTransform
+                }
             }
 
             // Calculate pixel bounds
@@ -744,25 +890,49 @@ class NDVIProcessor {
             }
 
             // Read all available bands concurrently
-            async let redData = cogReader.readRegion(url: redURL, pixelBounds: pixelBounds, authHeaders: authHeaders)
-            async let nirData = cogReader.readRegion(url: nirURL, pixelBounds: pixelBounds, authHeaders: authHeaders)
+            async let redData = cogReader.readRegion(url: redURL, pixelBounds: pixelBounds, authHeaders: authHeaders, requestSigner: requestSigner)
+            async let nirData = cogReader.readRegion(url: nirURL, pixelBounds: pixelBounds, authHeaders: authHeaders, requestSigner: requestSigner)
 
             let red = try await redData
             let nir = try await nirData
 
+            // Data integrity check: verify band dimensions match expected crop size
+            let redH = red.count
+            let nirH = nir.count
+            let redW = redH > 0 ? red[0].count : 0
+            let nirW = nirH > 0 ? nir[0].count : 0
+            if redH != height || redW != width || nirH != height || nirW != width {
+                log.error("\(dateStr) [\(srcName)]: band size mismatch — red=\(redW)x\(redH) nir=\(nirW)x\(nirH) expected=\(width)x\(height) — SKIPPED")
+                return nil
+            }
+
+            // Data integrity check: detect all-zero bands (failed download / nodata)
+            var redAllZero = true, nirAllZero = true
+            outerCheck: for row in stride(from: 0, to: height, by: max(1, height / 10)) {
+                for col in stride(from: 0, to: width, by: max(1, width / 10)) {
+                    if red[row][col] != 0 { redAllZero = false }
+                    if nir[row][col] != 0 { nirAllZero = false }
+                    if !redAllZero && !nirAllZero { break outerCheck }
+                }
+            }
+            if redAllZero || nirAllZero {
+                log.error("\(dateStr) [\(srcName)]: \(redAllZero ? "RED" : "") \(nirAllZero ? "NIR" : "") band all zeros — corrupt/nodata — SKIPPED")
+                return nil
+            }
+
             // Only download extra bands if needed for current display mode
-            let mode = settings.displayMode
+            let mode = displayMode
             var green: [[UInt16]]?
             var blue: [[UInt16]]?
             if mode == .fcc || mode == .rcc || mode == .bandGreen, let gURL = greenURL {
-                green = try? await cogReader.readRegion(url: gURL, pixelBounds: pixelBounds, authHeaders: authHeaders)
+                green = try? await cogReader.readRegion(url: gURL, pixelBounds: pixelBounds, authHeaders: authHeaders, requestSigner: requestSigner)
             }
             if mode == .rcc || mode == .bandBlue, let bURL = blueURL {
-                blue = try? await cogReader.readRegion(url: bURL, pixelBounds: pixelBounds, authHeaders: authHeaders)
+                blue = try? await cogReader.readRegion(url: bURL, pixelBounds: pixelBounds, authHeaders: authHeaders, requestSigner: requestSigner)
             }
 
             // Read SCL/Fmask band for cloud masking
-            let sclValidValues: Set<UInt16> = Set(settings.sclValidClasses.map { UInt16($0) })
+            let sclValidValues: Set<UInt16> = Set(sclValidClasses.map { UInt16($0) })
             let isHLS = sourceID == .earthdata
             var sclMask: [[Bool]]? // true = invalid
             var sclUpsampled: [[UInt16]]? // upsampled SCL values for display
@@ -779,7 +949,7 @@ class NDVIProcessor {
                         maxRow: (pixelBounds.maxRow + 1) / 2
                     )
                 }
-                if let sclData = try? await cogReader.readRegion(url: sURL, pixelBounds: sclBounds, authHeaders: authHeaders) {
+                if let sclData = try? await cogReader.readRegion(url: sURL, pixelBounds: sclBounds, authHeaders: authHeaders, requestSigner: requestSigner) {
                     // Upsample SCL mask to 10m pixel grid (nearest neighbor)
                     var mask = [[Bool]](repeating: [Bool](repeating: true, count: width), count: height)
                     var sclUp = [[UInt16]](repeating: [UInt16](repeating: 0, count: width), count: height)
@@ -839,7 +1009,13 @@ class NDVIProcessor {
             }
 
             // Compute VI — only SCL mask applied (no DN/reflectance filtering)
-            let viMode = settings.vegetationIndex
+            // Per-item DN offset: AWS applies BOA offset to pixels (dnOffset=0),
+            // PC serves raw ESA DNs where PB >= 04.00 has +1000 (dnOffset=-1000)
+            let dnOffset = item.dnOffset
+            if dnOffset != 0 {
+                log.info("\(dateStr) [\(srcName)]: applying DN offset \(Int(dnOffset)) (PB=\(item.properties.processingBaseline ?? "?"))")
+            }
+            let viMode = vegetationIndex
             var ndvi = [[Float]](repeating: [Float](repeating: .nan, count: width), count: height)
             var validCount = 0
             var validValues = [Float]()
@@ -858,28 +1034,35 @@ class NDVIProcessor {
                     polyPixelCount += 1
 
                     // SCL mask is the ONLY mask applied
-                    if settings.cloudMask, let mask = sclMask, mask[row][col] { continue }
+                    if cloudMask, let mask = sclMask, mask[row][col] { continue }
 
                     let rawRed = red[row][col]
                     let rawNir = nir[row][col]
-                    if rawRed == 0 && rawNir == 0 { zeroDNCount += 1 }
+
+                    // DN=0 is nodata, DN=65535 is saturated — skip both
+                    if rawRed == 0 || rawNir == 0 { zeroDNCount += 1; continue }
+                    if rawRed == 65535 || rawNir == 65535 { continue }
+
                     redDNMin = min(redDNMin, rawRed); redDNMax = max(redDNMax, rawRed)
                     nirDNMin = min(nirDNMin, rawNir); nirDNMax = max(nirDNMax, rawNir)
 
                     let redDN = Float(rawRed)
                     let nirDN = Float(rawNir)
 
-                    // DN to reflectance
-                    let redRefl = (redDN + baselineOffset) / quantificationValue
-                    let nirRefl = (nirDN + baselineOffset) / quantificationValue
+                    // DN to reflectance (per-item offset for cross-source harmonization)
+                    let redRefl = (redDN + dnOffset) / quantificationValue
+                    let nirRefl = (nirDN + dnOffset) / quantificationValue
+
+                    // Skip if reflectance is non-physical (negative after offset, or > 1.5)
+                    if redRefl < 0 || nirRefl < 0 || redRefl > 1.5 || nirRefl > 1.5 { continue }
 
                     // Compute selected vegetation index
                     let val: Float
                     switch viMode {
                     case .ndvi:
                         let sum = nirRefl + redRefl
-                        guard sum != 0 else { continue }
-                        val = min(1, max(-1, (nirRefl - redRefl) / sum))
+                        guard sum > 0 else { continue }
+                        val = (nirRefl - redRefl) / sum
                     case .dvi:
                         val = nirRefl - redRefl
                     }
@@ -891,7 +1074,7 @@ class NDVIProcessor {
 
             // Log DN range for diagnostics
             if polyPixelCount > 0 {
-                let unmasked = polyPixelCount - (settings.cloudMask && sclMask != nil ? sclMask!.flatMap{$0}.filter{$0}.count : 0)
+                let unmasked = polyPixelCount - (cloudMask && sclMask != nil ? sclMask!.flatMap{$0}.filter{$0}.count : 0)
                 log.info("\(dateStr) [\(srcName)] ID=\(item.id): DN red=\(redDNMin)-\(redDNMax) nir=\(nirDNMin)-\(nirDNMax) zero=\(zeroDNCount)/\(unmasked)")
             }
 
@@ -936,7 +1119,9 @@ class NDVIProcessor {
                 greenURL: greenURL,
                 blueURL: blueURL,
                 pixelBounds: pixelBounds,
-                sourceID: sourceID
+                sourceID: sourceID,
+                sceneID: item.id,
+                dnOffset: dnOffset
             )
         } catch let cogErr as COGError {
             // Rethrow HTTP errors so caller can retry from alternate source
@@ -946,6 +1131,255 @@ class NDVIProcessor {
             log.error("\(dateStr) [\(srcName)]: \(error.localizedDescription)")
             return nil
         }
+    }
+
+    // MARK: - GEE Processing
+
+    /// Process a single GEE scene via the computePixels REST API.
+    private func processGEEItem(
+        item: STACItem,
+        geometry: GeoJSONGeometry,
+        utm: UTMProjection,
+        bbox: (minLon: Double, minLat: Double, maxLon: Double, maxLat: Double),
+        cloudThreshold: Double,
+        geeTokenManager: GEETokenManager,
+        displayMode: AppSettings.DisplayMode = .fcc,
+        cloudMask: Bool = true,
+        sclValidClasses: Set<Int> = [4, 5],
+        vegetationIndex: AppSettings.VegetationIndex = .ndvi
+    ) async throws -> NDVIFrame? {
+        let dateStr = item.dateString
+        let srcName = "GEE"
+
+        // Extract GEE image ID from synthetic asset href
+        let imageID: String
+        if let asset = item.assets.values.first, asset.href.hasPrefix("gee://") {
+            imageID = String(asset.href.dropFirst(6))
+        } else {
+            imageID = item.id
+        }
+
+        // Cloud check
+        let cloudPercent = item.properties.cloudCover ?? 0
+        if cloudPercent > cloudThreshold {
+            log.warn("\(dateStr) [\(srcName)]: \(Int(cloudPercent))% cloud — skipping")
+            return nil
+        }
+
+        // Calculate UTM pixel bounds and dimensions
+        let corners = [
+            utm.forward(lon: bbox.minLon, lat: bbox.minLat),
+            utm.forward(lon: bbox.maxLon, lat: bbox.minLat),
+            utm.forward(lon: bbox.minLon, lat: bbox.maxLat),
+            utm.forward(lon: bbox.maxLon, lat: bbox.maxLat),
+        ]
+        let eastings = corners.map(\.easting)
+        let northings = corners.map(\.northing)
+        let minE = eastings.min()!
+        let maxE = eastings.max()!
+        let minN = northings.min()!
+        let maxN = northings.max()!
+
+        let resolution = 10.0
+        let width = Int(ceil((maxE - minE) / resolution))
+        let height = Int(ceil((maxN - minN) / resolution))
+        guard width > 0 && height > 0 && width < 5000 && height < 5000 else {
+            log.warn("\(dateStr) [\(srcName)]: invalid region size \(width)x\(height) — skipping")
+            return nil
+        }
+
+        // GEE grid transform: top-left corner, north-up (negative scaleY)
+        let gridTransform = (scaleX: resolution, scaleY: -resolution, translateX: minE, translateY: maxN)
+        let crsCode = "EPSG:\(utm.epsg)"
+        let projectID = KeychainService.retrieve(key: "gee.project") ?? ""
+        guard !projectID.isEmpty else {
+            throw GEEError.noProjectID
+        }
+
+        let geeService = GEEService(projectID: projectID, tokenManager: geeTokenManager)
+
+        // Determine which bands to request
+        var bandIds = ["B4", "B8"]  // red, nir always needed
+        let mode = displayMode
+        if mode == .fcc || mode == .rcc || mode == .bandGreen { bandIds.append("B3") }
+        if mode == .rcc || mode == .bandBlue { bandIds.append("B2") }
+        bandIds.append("SCL")
+
+        // Fetch all bands in one computePixels call
+        let result = try await geeService.fetchPixels(
+            imageID: imageID,
+            bandIds: bandIds,
+            transform: gridTransform,
+            width: width,
+            height: height,
+            crsCode: crsCode
+        )
+
+        guard result.bands.count == bandIds.count else {
+            log.error("\(dateStr) [\(srcName)]: expected \(bandIds.count) bands, got \(result.bands.count) — skipping")
+            return nil
+        }
+
+        // Map bands by name
+        var bandData = [String: [UInt16]]()
+        for (i, name) in bandIds.enumerated() {
+            bandData[name] = result.bands[i]
+        }
+
+        guard let redFlat = bandData["B4"], let nirFlat = bandData["B8"] else {
+            log.error("\(dateStr) [\(srcName)]: missing red/nir bands — skipping")
+            return nil
+        }
+
+        // Convert flat arrays to 2D
+        func to2D(_ flat: [UInt16]) -> [[UInt16]] {
+            var arr = [[UInt16]]()
+            arr.reserveCapacity(height)
+            for row in 0..<height {
+                let start = row * width
+                let end = min(start + width, flat.count)
+                if start < flat.count {
+                    arr.append(Array(flat[start..<end]))
+                } else {
+                    arr.append([UInt16](repeating: 0, count: width))
+                }
+            }
+            return arr
+        }
+
+        let red = to2D(redFlat)
+        let nir = to2D(nirFlat)
+        let green: [[UInt16]]? = bandData["B3"].map { to2D($0) }
+        let blue: [[UInt16]]? = bandData["B2"].map { to2D($0) }
+        let sclData: [[UInt16]]? = bandData["SCL"].map { to2D($0) }
+
+        // Data integrity: check for all-zero bands
+        var redAllZero = true, nirAllZero = true
+        outerCheck: for row in stride(from: 0, to: height, by: max(1, height / 10)) {
+            for col in stride(from: 0, to: width, by: max(1, width / 10)) {
+                if red[row][col] != 0 { redAllZero = false }
+                if nir[row][col] != 0 { nirAllZero = false }
+                if !redAllZero && !nirAllZero { break outerCheck }
+            }
+        }
+        if redAllZero || nirAllZero {
+            log.error("\(dateStr) [\(srcName)]: \(redAllZero ? "RED" : "") \(nirAllZero ? "NIR" : "") band all zeros — SKIPPED")
+            return nil
+        }
+
+        // Build SCL mask
+        let sclValidValues: Set<UInt16> = Set(sclValidClasses.map { UInt16($0) })
+        var sclMask: [[Bool]]?
+        if let scl = sclData {
+            var mask = [[Bool]](repeating: [Bool](repeating: true, count: width), count: height)
+            for row in 0..<height {
+                for col in 0..<width {
+                    if row < scl.count && col < scl[row].count {
+                        mask[row][col] = !sclValidValues.contains(scl[row][col])
+                    }
+                }
+            }
+            sclMask = mask
+        }
+
+        // Build polygon mask
+        let scaleX = resolution
+        let originX = minE
+        let scaleY = -resolution
+        let originY = maxN
+        var polyPixels = [(col: Double, row: Double)]()
+        for vertex in geometry.polygon {
+            let utmPt = utm.forward(lon: vertex.lon, lat: vertex.lat)
+            let pixCol = (utmPt.easting - originX) / scaleX
+            let pixRow = (utmPt.northing - originY) / scaleY
+            polyPixels.append((col: pixCol, row: pixRow))
+        }
+
+        // Compute VI — GEE S2_SR_HARMONIZED: DN/10000 = reflectance (no offset)
+        let viMode = vegetationIndex
+        var ndvi = [[Float]](repeating: [Float](repeating: .nan, count: width), count: height)
+        var validCount = 0
+        var validValues = [Float]()
+        var polyPixelCount = 0
+        var zeroDNCount = 0
+
+        for row in 0..<height {
+            for col in 0..<width {
+                guard Self.pointInPolygon(
+                    x: Double(col) + 0.5, y: Double(row) + 0.5,
+                    polygon: polyPixels
+                ) else { continue }
+                polyPixelCount += 1
+
+                if cloudMask, let mask = sclMask, mask[row][col] { continue }
+
+                let rawRed = red[row][col]
+                let rawNir = nir[row][col]
+
+                // DN=0 is nodata, DN=65535 is saturated
+                if rawRed == 0 || rawNir == 0 { zeroDNCount += 1; continue }
+                if rawRed == 65535 || rawNir == 65535 { continue }
+
+                // GEE S2_SR_HARMONIZED: reflectance = DN / 10000 (no offset)
+                let redRefl = Float(rawRed) / quantificationValue
+                let nirRefl = Float(rawNir) / quantificationValue
+
+                if redRefl < 0 || nirRefl < 0 || redRefl > 1.5 || nirRefl > 1.5 { continue }
+
+                let val: Float
+                switch viMode {
+                case .ndvi:
+                    let sum = nirRefl + redRefl
+                    guard sum > 0 else { continue }
+                    val = (nirRefl - redRefl) / sum
+                case .dvi:
+                    val = nirRefl - redRefl
+                }
+                ndvi[row][col] = val
+                validValues.append(val)
+                validCount += 1
+            }
+        }
+
+        let medianNDVI: Float
+        if validValues.isEmpty {
+            medianNDVI = 0
+        } else {
+            let sorted = validValues.sorted()
+            let mid = sorted.count / 2
+            medianNDVI = sorted.count % 2 == 0 ? (sorted[mid - 1] + sorted[mid]) / 2 : sorted[mid]
+        }
+
+        if validCount == 0 {
+            log.warn("\(dateStr) [\(srcName)]: no valid pixels after masking — dropped")
+            return nil
+        }
+
+        log.success("\(dateStr) [\(srcName)]: \(validCount)/\(polyPixelCount) valid, median \(viMode.rawValue)=\(String(format: "%.3f", medianNDVI)), cloud=\(Int(cloudPercent))%")
+
+        let date = item.date ?? Date()
+        let polyNorm = polyPixels.map { (x: $0.col / Double(width), y: $0.row / Double(height)) }
+
+        return NDVIFrame(
+            date: date,
+            dateString: item.dateString,
+            ndvi: ndvi,
+            width: width,
+            height: height,
+            cloudFraction: cloudPercent / 100.0,
+            medianNDVI: medianNDVI,
+            validPixelCount: validCount,
+            polyPixelCount: polyPixelCount,
+            redBand: red,
+            nirBand: nir,
+            greenBand: green,
+            blueBand: blue,
+            sclBand: sclData,
+            polygonNorm: polyNorm,
+            sourceID: .gee,
+            sceneID: item.id,
+            dnOffset: 0
+        )
     }
 
     /// Lazy-load missing bands for display mode change.
@@ -1076,17 +1510,25 @@ class NDVIProcessor {
                         if !sclValid.contains(scl[row][col]) { continue }
                     }
 
-                    let redDN = Float(frame.redBand[row][col])
-                    let nirDN = Float(frame.nirBand[row][col])
-                    let redRefl = (redDN + baselineOffset) / quantificationValue
-                    let nirRefl = (nirDN + baselineOffset) / quantificationValue
+                    let rawRed = frame.redBand[row][col]
+                    let rawNir = frame.nirBand[row][col]
+
+                    // DN=0 is nodata, DN=65535 is saturated
+                    if rawRed == 0 || rawNir == 0 || rawRed == 65535 || rawNir == 65535 { continue }
+
+                    let redDN = Float(rawRed)
+                    let nirDN = Float(rawNir)
+                    let redRefl = (redDN + frame.dnOffset) / quantificationValue
+                    let nirRefl = (nirDN + frame.dnOffset) / quantificationValue
+
+                    if redRefl < 0 || nirRefl < 0 || redRefl > 1.5 || nirRefl > 1.5 { continue }
 
                     let val: Float
                     switch viMode {
                     case .ndvi:
                         let sum = nirRefl + redRefl
-                        guard sum != 0 else { continue }
-                        val = min(1, max(-1, (nirRefl - redRefl) / sum))
+                        guard sum > 0 else { continue }
+                        val = (nirRefl - redRefl) / sum
                     case .dvi:
                         val = nirRefl - redRefl
                     }
@@ -1112,7 +1554,8 @@ class NDVIProcessor {
                 greenBand: frame.greenBand, blueBand: frame.blueBand, sclBand: frame.sclBand,
                 polygonNorm: frame.polygonNorm,
                 greenURL: frame.greenURL, blueURL: frame.blueURL,
-                pixelBounds: frame.pixelBounds, sourceID: frame.sourceID
+                pixelBounds: frame.pixelBounds, sourceID: frame.sourceID,
+                dnOffset: frame.dnOffset
             )
         }
         log.info("Recomputed \(viMode.rawValue) for \(frames.count) frames")

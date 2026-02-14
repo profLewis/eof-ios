@@ -1,11 +1,12 @@
 import Foundation
 
-/// Identifies a STAC data source.
+/// Identifies a data source.
 enum SourceID: String, CaseIterable, Codable, Identifiable {
     case aws = "aws"
     case planetary = "planetary"
     case cdse = "cdse"
     case earthdata = "earthdata"
+    case gee = "gee"
 
     var id: String { rawValue }
 
@@ -15,6 +16,7 @@ enum SourceID: String, CaseIterable, Codable, Identifiable {
         case .planetary: return "globe.americas"
         case .cdse: return "globe.europe.africa"
         case .earthdata: return "globe.central.south.asia"
+        case .gee: return "globe.badge.chevron.backward"
         }
     }
 }
@@ -29,14 +31,15 @@ struct BandMapping: Codable, Equatable {
     let projTransformKey: String
 }
 
-/// Authentication type for COG asset access.
+/// Authentication type for asset access.
 enum AssetAuthType: String, Codable {
     case none
     case sasToken       // Microsoft Planetary Computer
     case bearerToken    // CDSE, NASA Earthdata
+    case geeOAuth       // Google Earth Engine OAuth2
 }
 
-/// Complete configuration for a single STAC source.
+/// Complete configuration for a single data source.
 struct STACSourceConfig: Codable, Identifiable, Equatable {
     let sourceID: SourceID
     var isEnabled: Bool
@@ -115,6 +118,23 @@ struct STACSourceConfig: Codable, Identifiable, Equatable {
                 red: "B04", nir: "B8A", green: "B03",
                 blue: "B02", scl: "Fmask",
                 projTransformKey: "B04"
+            )
+        )
+    }
+
+    static func geeDefault() -> STACSourceConfig {
+        STACSourceConfig(
+            sourceID: .gee,
+            isEnabled: false,
+            displayName: "Google Earth Engine",
+            shortName: "GEE",
+            searchURL: "https://earthengine.googleapis.com/v1",
+            collection: "COPERNICUS/S2_SR_HARMONIZED",
+            assetAuthType: .geeOAuth,
+            bandMapping: BandMapping(
+                red: "B4", nir: "B8", green: "B3",
+                blue: "B2", scl: "SCL",
+                projTransformKey: "B4"
             )
         )
     }
