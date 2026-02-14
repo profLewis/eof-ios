@@ -4,6 +4,7 @@ import AuthenticationServices
 
 struct DataSourcesView: View {
     @Binding var isPresented: Bool
+    var onCompare: (() -> Void)?
     @State private var settings = AppSettings.shared
     @State private var isBenchmarking = false
     @State private var showingCredentialExporter = false
@@ -37,6 +38,18 @@ struct DataSourcesView: View {
                         }
                     }
                     .disabled(isBenchmarking)
+
+                    if onCompare != nil {
+                        Button {
+                            isPresented = false
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                                onCompare?()
+                            }
+                        } label: {
+                            Label("Compare Sources", systemImage: "arrow.triangle.2.circlepath")
+                        }
+                        .tint(.orange)
+                    }
 
                     ForEach(settings.benchmarkResults) { result in
                         benchmarkRow(result: result)

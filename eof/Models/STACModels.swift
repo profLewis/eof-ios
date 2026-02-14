@@ -85,6 +85,8 @@ struct STACProperties: Codable {
     let boaOffsetApplied: Bool?
     /// S2 processing baseline (e.g. "04.00"). PB >= 04.00 has BOA_ADD_OFFSET = -1000
     let processingBaseline: String?
+    /// Full ESA product URI — contains processing version (N0509, N0510) and processing date
+    let productURI: String?
 
     enum CodingKeys: String, CodingKey {
         case datetime
@@ -92,6 +94,7 @@ struct STACProperties: Codable {
         case projEpsg = "proj:epsg"
         case boaOffsetApplied = "earthsearch:boa_offset_applied"
         case processingBaseline = "s2:processing_baseline"
+        case productURI = "s2:product_uri"
     }
 }
 

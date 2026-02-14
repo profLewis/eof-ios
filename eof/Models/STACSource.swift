@@ -94,13 +94,13 @@ struct STACSourceConfig: Codable, Identifiable, Equatable {
             isEnabled: false,
             displayName: "Copernicus Data Space",
             shortName: "CDSE",
-            searchURL: "https://catalogue.dataspace.copernicus.eu/odata/v1/Products",
+            searchURL: "https://catalogue.dataspace.copernicus.eu/stac/search",
             collection: "sentinel-2-l2a",
             assetAuthType: .bearerToken,
             bandMapping: BandMapping(
-                red: "B04", nir: "B08", green: "B03",
-                blue: "B02", scl: "SCL",
-                projTransformKey: "B04"
+                red: "B04_10m", nir: "B08_10m", green: "B03_10m",
+                blue: "B02_10m", scl: "SCL_20m",
+                projTransformKey: "B04_10m"
             )
         )
     }

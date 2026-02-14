@@ -277,16 +277,17 @@ struct PixelDetailView: View {
         var points = [ReflPoint]()
         for frame in sorted {
             guard row < frame.height, col < frame.width else { continue }
-            let redRefl = Double(frame.redBand[row][col]) / 10000
-            let nirRefl = Double(frame.nirBand[row][col]) / 10000
+            let ofs = Double(frame.dnOffset)
+            let redRefl = (Double(frame.redBand[row][col]) + ofs) / 10000
+            let nirRefl = (Double(frame.nirBand[row][col]) + ofs) / 10000
             points.append(ReflPoint(id: "r_\(frame.dateString)", date: frame.date, value: redRefl, band: "Red"))
             points.append(ReflPoint(id: "n_\(frame.dateString)", date: frame.date, value: nirRefl, band: "NIR"))
             if let g = frame.greenBand {
-                let gRefl = Double(g[row][col]) / 10000
+                let gRefl = (Double(g[row][col]) + ofs) / 10000
                 points.append(ReflPoint(id: "g_\(frame.dateString)", date: frame.date, value: gRefl, band: "Green"))
             }
             if let b = frame.blueBand {
-                let bRefl = Double(b[row][col]) / 10000
+                let bRefl = (Double(b[row][col]) + ofs) / 10000
                 points.append(ReflPoint(id: "b_\(frame.dateString)", date: frame.date, value: bRefl, band: "Blue"))
             }
         }

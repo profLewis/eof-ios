@@ -42,6 +42,7 @@
 		BB0F00000000000000000002 /* ClusterView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0F00000000000000000001 /* ClusterView.swift */; };
 		BB0F00000000000000000004 /* SelectionAnalysisView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0F00000000000000000003 /* SelectionAnalysisView.swift */; };
 		SIG002 /* SigV4Signer.swift in Sources */ = {isa = PBXBuildFile; fileRef = SIG001 /* SigV4Signer.swift */; };
+		CC0F00000000000000000002 /* SourceComparisonView.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC0F00000000000000000001 /* SourceComparisonView.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -81,6 +82,7 @@
 		BB0F00000000000000000001 /* ClusterView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClusterView.swift; sourceTree = "<group>"; };
 		BB0F00000000000000000003 /* SelectionAnalysisView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SelectionAnalysisView.swift; sourceTree = "<group>"; };
 		SIG001 /* SigV4Signer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SigV4Signer.swift; sourceTree = "<group>"; };
+		CC0F00000000000000000001 /* SourceComparisonView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SourceComparisonView.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -164,6 +166,7 @@
 				AA0F00000000000000000005 /* PixelDetailView.swift */,
 				BB0F00000000000000000001 /* ClusterView.swift */,
 				BB0F00000000000000000003 /* SelectionAnalysisView.swift */,
+				CC0F00000000000000000001 /* SourceComparisonView.swift */,
 			);
 			path = Views;
 			sourceTree = "<group>";
@@ -286,6 +289,7 @@
 				AA0F00000000000000000006 /* PixelDetailView.swift in Sources */,
 				BB0F00000000000000000002 /* ClusterView.swift in Sources */,
 				BB0F00000000000000000004 /* SelectionAnalysisView.swift in Sources */,
+				CC0F00000000000000000002 /* SourceComparisonView.swift in Sources */,
 				SIG002 /* SigV4Signer.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;

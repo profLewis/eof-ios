@@ -209,7 +209,8 @@ struct GEEService {
             cloudCover: cloudCover,
             projEpsg: utm.epsg,
             boaOffsetApplied: nil,
-            processingBaseline: nil
+            processingBaseline: nil,
+            productURI: nil
         )
 
         // Synthetic assets with gee:// hrefs containing the image ID

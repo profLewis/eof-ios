@@ -3,6 +3,7 @@ import Charts
 
 struct SettingsView: View {
     @Binding var isPresented: Bool
+    var onCompare: (() -> Void)?
     @State private var settings = AppSettings.shared
     @State private var showingBandInfo = false
     @State private var showingAbout = false
@@ -97,6 +98,20 @@ struct SettingsView: View {
                     if let geo = settings.aoiGeometry {
                         LabeledContent("Extent", value: settings.aoiSummary)
                             .font(.caption)
+                    }
+                }
+
+                Section {
+                    Button {
+                        showingDataSources = true
+                    } label: {
+                        HStack {
+                            Label("Data Sources", systemImage: "server.rack")
+                            Spacer()
+                            Text("\(settings.enabledSources.count) active")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
                     }
                 }
 
@@ -200,23 +215,11 @@ struct SettingsView: View {
                             value: $settings.minSeasonLength, in: 10...200, step: 10)
                     Stepper("Max Season Length: \(settings.maxSeasonLength) days",
                             value: $settings.maxSeasonLength, in: 100...365, step: 10)
-                    Text("Per-pixel fitting uses median fit as starting point. Higher perturbation explores more but is slower. Cluster filter threshold controls outlier sensitivity — lower values are stricter. Spatial regularization rescues isolated outliers with good neighbors. Season length is optimized directly as a parameter (not inferred from EOS\u{2212}SOS).")
+                    Stepper("Slope Symmetry: \(settings.slopeSymmetry)%",
+                            value: $settings.slopeSymmetry, in: 0...100, step: 5)
+                    Text("Per-pixel fitting uses median fit as starting point. Higher perturbation explores more but is slower. Cluster filter threshold controls outlier sensitivity — lower values are stricter. Slope symmetry constrains senescence rate to be within N% of green-up rate (0 = unconstrained). Season length is optimized directly as a parameter.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                }
-
-                Section {
-                    Button {
-                        showingDataSources = true
-                    } label: {
-                        HStack {
-                            Label("Data Sources", systemImage: "server.rack")
-                            Spacer()
-                            Text("\(settings.enabledSources.count) active")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-                    }
                 }
 
                 Section {
@@ -250,7 +253,13 @@ struct SettingsView: View {
                     .presentationDetents([.large])
             }
             .sheet(isPresented: $showingDataSources) {
-                DataSourcesView(isPresented: $showingDataSources)
+                DataSourcesView(isPresented: $showingDataSources, onCompare: {
+                    showingDataSources = false
+                    isPresented = false
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                        onCompare?()
+                    }
+                })
                     .presentationDetents([.large])
             }
             .sheet(isPresented: $showingSCLMask) {
@@ -492,19 +501,16 @@ struct BandInfoView: View {
                 y: .value("Response", pt.response),
                 series: .value("Band", pt.band)
             )
-            .foregroundStyle(by: .value("Band", pt.band))
-            .opacity(0.3)
+            .foregroundStyle(pt.color.opacity(0.3))
 
             LineMark(
                 x: .value("Wavelength", pt.wavelength),
                 y: .value("Response", pt.response),
                 series: .value("Band", pt.band)
             )
-            .foregroundStyle(by: .value("Band", pt.band))
+            .foregroundStyle(pt.color)
             .lineStyle(StrokeStyle(lineWidth: 1.5))
         }
-        .chartForegroundStyleScale(domain: Self.bandData.map { $0.name },
-                                   range: Self.bandData.map { $0.color })
         .chartXAxis {
             AxisMarks(values: [400, 600, 800, 1000, 1200, 1600, 2000, 2400]) { value in
                 AxisGridLine()

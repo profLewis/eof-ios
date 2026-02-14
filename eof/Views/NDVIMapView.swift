@@ -361,8 +361,8 @@ struct NDVIMapView: View {
 
                 let redDN = Float(frame.redBand[row][col])
                 let nirDN = Float(frame.nirBand[row][col])
-                let redR = redDN / 10000
-                let nirR = nirDN / 10000
+                let redR = (redDN + frame.dnOffset) / 10000
+                let nirR = (nirDN + frame.dnOffset) / 10000
                 let sum = nirR + redR
                 var val: Float
                 if sum != 0 {
@@ -505,8 +505,9 @@ struct NDVIMapView: View {
     }
 
     /// Convert S2 L2A DN to display byte (0-255) with stretch.
+    /// Applies per-frame DN offset for correct reflectance across all sources.
     private func dnToDisplay(_ dn: UInt16) -> UInt8 {
-        let refl = Float(dn) / 10000.0
+        let refl = (Float(dn) + frame.dnOffset) / 10000.0
         let stretched = max(0, min(1, refl / 0.3))
         return UInt8(stretched * 255)
     }

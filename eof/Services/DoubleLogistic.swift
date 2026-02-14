@@ -128,7 +128,8 @@ enum DoubleLogistic {
         initial: DLParams,
         maxIter: Int = 2000,
         minSeasonLength: Double = 0,
-        maxSeasonLength: Double = 366
+        maxSeasonLength: Double = 366,
+        slopeSymmetry: Double = 0
     ) -> DLParams {
         let n = 6  // number of parameters
         let x0 = initial.asOptArray  // [mn, delta, sos, rsp, seasonLength, rau]
@@ -141,6 +142,13 @@ enum DoubleLogistic {
             var c = x
             for i in 0..<n {
                 c[i] = max(lo[i], min(hi[i], c[i]))
+            }
+            // Slope symmetry: constrain rau (index 5) relative to rsp (index 3)
+            if slopeSymmetry > 0 {
+                let frac = slopeSymmetry / 100.0
+                let rsp = c[3]
+                c[5] = max(rsp * (1 - frac), min(rsp * (1 + frac), c[5]))
+                c[5] = max(lo[5], min(hi[5], c[5]))  // re-enforce absolute bounds
             }
             return c
         }
@@ -291,7 +299,8 @@ enum DoubleLogistic {
         perturbation: Double = 0.50,
         slopePerturbation: Double = 0.10,
         minSeasonLength: Double = 0,
-        maxSeasonLength: Double = 366
+        maxSeasonLength: Double = 366,
+        slopeSymmetry: Double = 0
     ) -> (best: DLParams, ensemble: [DLParams]) {
         let filtered = filterCycleContamination(data: data)
         let guess = initialGuess(data: filtered)
@@ -324,7 +333,8 @@ enum DoubleLogistic {
                 }
             }
             let fitted = fit(data: filtered, initial: perturbed,
-                           minSeasonLength: minSeasonLength, maxSeasonLength: maxSeasonLength)
+                           minSeasonLength: minSeasonLength, maxSeasonLength: maxSeasonLength,
+                           slopeSymmetry: slopeSymmetry)
             allFits.append(fitted)
         }
 
@@ -353,7 +363,8 @@ enum DoubleLogistic {
         }
 
         var bestFit = fit(data: filtered, initial: medianParams, maxIter: settings.maxIter,
-                         minSeasonLength: settings.minSeasonLength, maxSeasonLength: settings.maxSeasonLength)
+                         minSeasonLength: settings.minSeasonLength, maxSeasonLength: settings.maxSeasonLength,
+                         slopeSymmetry: settings.slopeSymmetry)
 
         for _ in 1..<settings.ensembleRuns {
             var perturbed = medianParams
@@ -378,7 +389,8 @@ enum DoubleLogistic {
             }
 
             let candidate = fit(data: filtered, initial: perturbed, maxIter: settings.maxIter,
-                              minSeasonLength: settings.minSeasonLength, maxSeasonLength: settings.maxSeasonLength)
+                              minSeasonLength: settings.minSeasonLength, maxSeasonLength: settings.maxSeasonLength,
+                              slopeSymmetry: settings.slopeSymmetry)
             if candidate.rmse < bestFit.rmse {
                 bestFit = candidate
             }
@@ -398,4 +410,5 @@ struct PhenologyFitSettings: Sendable {
     let minObservations: Int
     let minSeasonLength: Double  // minimum eos - sos (days)
     let maxSeasonLength: Double  // maximum eos - sos (days)
+    let slopeSymmetry: Double    // max % difference between rsp and rau (0 = unconstrained)
 }

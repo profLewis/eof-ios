@@ -36,6 +36,10 @@ struct NDVIFrame: Identifiable, Codable {
     var sceneID: String?
     /// DN offset for reflectance conversion (0 for AWS, -1000 for PC PB>=04.00)
     var dnOffset: Float = 0
+    /// S2 processing baseline (e.g. "05.09", "05.10")
+    var processingBaseline: String?
+    /// ESA product URI (contains N0509/N0510 version + processing date)
+    var productURI: String?
 
     /// Tuple accessors for compatibility
     var polygonNorm: [(x: Double, y: Double)] {
@@ -80,7 +84,7 @@ struct NDVIFrame: Identifiable, Codable {
         case polygonNormX, polygonNormY
         case greenURL, blueURL
         case pixelBoundsMinCol, pixelBoundsMinRow, pixelBoundsMaxCol, pixelBoundsMaxRow
-        case sourceID, sceneID, dnOffset
+        case sourceID, sceneID, dnOffset, processingBaseline, productURI
     }
 
     // Custom encode/decode to handle Float.nan in ndvi array (JSON doesn't support NaN)
@@ -116,6 +120,8 @@ struct NDVIFrame: Identifiable, Codable {
         try container.encodeIfPresent(sourceID, forKey: .sourceID)
         try container.encodeIfPresent(sceneID, forKey: .sceneID)
         try container.encode(dnOffset, forKey: .dnOffset)
+        try container.encodeIfPresent(processingBaseline, forKey: .processingBaseline)
+        try container.encodeIfPresent(productURI, forKey: .productURI)
     }
 
     init(from decoder: Decoder) throws {
@@ -148,6 +154,8 @@ struct NDVIFrame: Identifiable, Codable {
         sourceID = try container.decodeIfPresent(SourceID.self, forKey: .sourceID)
         sceneID = try container.decodeIfPresent(String.self, forKey: .sceneID)
         dnOffset = (try? container.decode(Float.self, forKey: .dnOffset)) ?? 0
+        processingBaseline = try container.decodeIfPresent(String.self, forKey: .processingBaseline)
+        productURI = try container.decodeIfPresent(String.self, forKey: .productURI)
     }
 
     /// Convenience init matching the old tuple-based API
@@ -158,7 +166,8 @@ struct NDVIFrame: Identifiable, Codable {
          polygonNorm: [(x: Double, y: Double)] = [],
          greenURL: URL? = nil, blueURL: URL? = nil,
          pixelBounds: (minCol: Int, minRow: Int, maxCol: Int, maxRow: Int)? = nil,
-         sourceID: SourceID? = nil, sceneID: String? = nil, dnOffset: Float = 0) {
+         sourceID: SourceID? = nil, sceneID: String? = nil, dnOffset: Float = 0,
+         processingBaseline: String? = nil, productURI: String? = nil) {
         self.id = UUID()
         self.date = date
         self.dateString = dateString
@@ -185,5 +194,7 @@ struct NDVIFrame: Identifiable, Codable {
         self.sourceID = sourceID
         self.sceneID = sceneID
         self.dnOffset = dnOffset
+        self.processingBaseline = processingBaseline
+        self.productURI = productURI
     }
 }

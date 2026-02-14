@@ -14,6 +14,8 @@ class NDVIProcessor {
     var sourceProgresses: [SourceProgress] = []
     var isCancelled = false
     var isPaused = false
+    var compareSourcesMode = false
+    var comparisonPairs: [SourceComparisonView.ComparisonPair] = []
 
     private var lastGeometryCentroid: (lon: Double, lat: Double)?
     private var fetchTask: Task<Void, Never>?
@@ -195,7 +197,15 @@ class NDVIProcessor {
                 log.info("\(src.shortName): \(count) scenes available")
             }
 
-            var totalItems = orderedKeys.count
+            // In comparison mode, count total tasks (multiple sources per date)
+            var totalItems: Int
+            if compareSourcesMode {
+                totalItems = orderedKeys.reduce(0) { acc, key in
+                    acc + max(1, (candidatesByKey[key]?.count ?? 1))
+                }
+            } else {
+                totalItems = orderedKeys.count
+            }
             guard totalItems > 0 else {
                 log.error("No Sentinel-2 items found for date range")
                 throw STACError.noItems
@@ -205,6 +215,10 @@ class NDVIProcessor {
                let firstItem = candidatesByKey[firstKey]?.first?.0,
                let tile = firstItem.mgrsTile {
                 log.info("MGRS tile: \(tile)")
+            }
+            if compareSourcesMode {
+                let multiSourceDates = orderedKeys.filter { (candidatesByKey[$0]?.count ?? 0) > 1 }.count
+                log.info("COMPARISON MODE: \(totalItems) tasks (\(multiSourceDates) dates with multiple sources)")
             }
             progressMessage = "Found \(totalItems) scenes — reading imagery..."
             status = .processing
@@ -315,7 +329,11 @@ class NDVIProcessor {
                         sourceInFlight[failedSrc, default: 0] -= 1
 
                         httpErrorCount += 1
-                        if let alts = candidatesByKey[dateKey],
+                        if self.compareSourcesMode {
+                            // In comparison mode, just skip failed sources — don't retry
+                            let reason = code > 0 ? "HTTP \(code)" : "failed"
+                            log.warn("\(dateKey): \(failedSrc.rawValue.uppercased()) \(reason), skipped (comparison mode)")
+                        } else if let alts = candidatesByKey[dateKey],
                            alts.contains(where: { $0.1.sourceID != failedSrc }) {
                             let reason = code > 0 ? "HTTP \(code)" : "failed"
                             log.warn("\(dateKey): \(failedSrc.rawValue.uppercased()) \(reason), will retry from alternate")
@@ -357,60 +375,74 @@ class NDVIProcessor {
                     keyIndex += 1
                     guard let candidates = candidatesByKey[key] else { continue }
 
-                    let (item, cfg) = pickBestSource(from: candidates)
-                    sourceInFlight[cfg.sourceID, default: 0] += 1
-                    let dateKey = key
-                    let slot = freeSlots.isEmpty ? nextSlot : freeSlots.removeFirst()
-                    if freeSlots.isEmpty && nextSlot < maxConc { nextSlot += 1 }
-                    if slot < sourceProgresses.count {
-                        sourceProgresses[slot].currentSource = cfg.shortName
+                    // In comparison mode: process ALL sources for each date
+                    // In normal mode: pick the best source
+                    let selectedCandidates: [(STACItem, STACSourceConfig)]
+                    if self.compareSourcesMode && candidates.count > 1 {
+                        selectedCandidates = candidates
+                    } else {
+                        selectedCandidates = [pickBestSource(from: candidates)]
                     }
 
-                    group.addTask {
-                        let t0 = CFAbsoluteTimeGetCurrent()
-                        do {
-                            let frame: NDVIFrame?
-                            if cfg.sourceID == .gee {
-                                frame = try await self.processGEEItem(
-                                    item: item, geometry: geometry,
-                                    utm: utm, bbox: bbox,
-                                    cloudThreshold: cloudThreshold,
-                                    geeTokenManager: geeTokenManager!,
-                                    displayMode: capturedDisplayMode,
-                                    cloudMask: capturedCloudMask,
-                                    sclValidClasses: capturedSCLValidClasses,
-                                    vegetationIndex: capturedVegetationIndex
-                                )
-                            } else {
-                                frame = try await self.processItem(
-                                    item: item, geometry: geometry,
-                                    utm: utm, bbox: bbox,
-                                    cloudThreshold: cloudThreshold,
-                                    bandMapping: cfg.bandMapping,
-                                    sasTokenManager: sasManagers[cfg.sourceID],
-                                    bearerTokenManager: bearerManagers[cfg.sourceID],
-                                    sourceID: cfg.sourceID,
-                                    collection: cfg.collection,
-                                    displayMode: capturedDisplayMode,
-                                    cloudMask: capturedCloudMask,
-                                    sclValidClasses: capturedSCLValidClasses,
-                                    vegetationIndex: capturedVegetationIndex
-                                )
-                            }
-                            return .success(frame, slot, cfg.sourceID, CFAbsoluteTimeGetCurrent() - t0)
-                        } catch let err as COGError {
-                            let elapsed = CFAbsoluteTimeGetCurrent() - t0
-                            if case .httpError(let code) = err {
-                                return .httpFailed(dateKey, cfg.sourceID, code, slot, elapsed)
-                            }
-                            // Any COG error → retry from alternate source
-                            return .httpFailed(dateKey, cfg.sourceID, 0, slot, elapsed)
-                        } catch {
-                            // Any other error → retry from alternate source
-                            return .httpFailed(dateKey, cfg.sourceID, 0, slot, CFAbsoluteTimeGetCurrent() - t0)
+                    for (item, cfg) in selectedCandidates {
+                        while running >= currentMaxConc {
+                            if let result = await group.next() { handleResult(result) }
                         }
+
+                        sourceInFlight[cfg.sourceID, default: 0] += 1
+                        let dateKey = key
+                        let slot = freeSlots.isEmpty ? nextSlot : freeSlots.removeFirst()
+                        if freeSlots.isEmpty && nextSlot < maxConc { nextSlot += 1 }
+                        if slot < sourceProgresses.count {
+                            sourceProgresses[slot].currentSource = cfg.shortName
+                        }
+
+                        group.addTask {
+                            let t0 = CFAbsoluteTimeGetCurrent()
+                            do {
+                                let frame: NDVIFrame?
+                                if cfg.sourceID == .gee {
+                                    frame = try await self.processGEEItem(
+                                        item: item, geometry: geometry,
+                                        utm: utm, bbox: bbox,
+                                        cloudThreshold: cloudThreshold,
+                                        geeTokenManager: geeTokenManager!,
+                                        displayMode: capturedDisplayMode,
+                                        cloudMask: capturedCloudMask,
+                                        sclValidClasses: capturedSCLValidClasses,
+                                        vegetationIndex: capturedVegetationIndex
+                                    )
+                                } else {
+                                    frame = try await self.processItem(
+                                        item: item, geometry: geometry,
+                                        utm: utm, bbox: bbox,
+                                        cloudThreshold: cloudThreshold,
+                                        bandMapping: cfg.bandMapping,
+                                        sasTokenManager: sasManagers[cfg.sourceID],
+                                        bearerTokenManager: bearerManagers[cfg.sourceID],
+                                        sourceID: cfg.sourceID,
+                                        collection: cfg.collection,
+                                        displayMode: capturedDisplayMode,
+                                        cloudMask: capturedCloudMask,
+                                        sclValidClasses: capturedSCLValidClasses,
+                                        vegetationIndex: capturedVegetationIndex
+                                    )
+                                }
+                                return .success(frame, slot, cfg.sourceID, CFAbsoluteTimeGetCurrent() - t0)
+                            } catch let err as COGError {
+                                let elapsed = CFAbsoluteTimeGetCurrent() - t0
+                                if case .httpError(let code) = err {
+                                    return .httpFailed(dateKey, cfg.sourceID, code, slot, elapsed)
+                                }
+                                // Any COG error → retry from alternate source
+                                return .httpFailed(dateKey, cfg.sourceID, 0, slot, elapsed)
+                            } catch {
+                                // Any other error → retry from alternate source
+                                return .httpFailed(dateKey, cfg.sourceID, 0, slot, CFAbsoluteTimeGetCurrent() - t0)
+                            }
+                        }
+                        running += 1
                     }
-                    running += 1
                 }
 
                 // Retries — pick from alternate sources, excluding the one that failed
@@ -504,6 +536,30 @@ class NDVIProcessor {
             // Sort by date — keep whatever frames we have (even if cancelled)
             frames = newFrames.sorted { $0.date < $1.date }
             lastGeometryCentroid = (lon: centroid.lon, lat: centroid.lat)
+
+            // Assemble comparison pairs — all pairwise source combinations per date
+            if compareSourcesMode {
+                var pairsByDate = [String: [NDVIFrame]]()
+                for f in frames { pairsByDate[f.dateString, default: []].append(f) }
+                comparisonPairs = []
+                for (dateStr, dateFrames) in pairsByDate.sorted(by: { $0.key < $1.key }) {
+                    // Generate all pairwise combinations (skip same-source pairs)
+                    for i in 0..<dateFrames.count {
+                        for j in (i+1)..<dateFrames.count {
+                            let srcI = dateFrames[i].sourceID
+                            let srcJ = dateFrames[j].sourceID
+                            if srcI != nil && srcJ != nil && srcI == srcJ { continue }
+                            comparisonPairs.append(SourceComparisonView.ComparisonPair(
+                                dateString: dateStr, frameA: dateFrames[i], frameB: dateFrames[j]
+                            ))
+                        }
+                    }
+                }
+                let sourcePairNames = Set(comparisonPairs.map { p in
+                    "\(p.frameA.sourceID?.rawValue ?? "?") vs \(p.frameB.sourceID?.rawValue ?? "?")"
+                })
+                log.info("Source comparison: \(comparisonPairs.count) pairs from \(frames.count) frames (\(sourcePairNames.joined(separator: ", ")))")
+            }
 
             if isCancelled {
                 isCancelled = false
@@ -921,14 +977,15 @@ class NDVIProcessor {
                 return nil
             }
 
-            // Only download extra bands if needed for current display mode
+            // Download extra bands: always in comparison mode, otherwise only if display mode needs them
             let mode = displayMode
+            let loadAllBands = compareSourcesMode
             var green: [[UInt16]]?
             var blue: [[UInt16]]?
-            if mode == .fcc || mode == .rcc || mode == .bandGreen, let gURL = greenURL {
+            if loadAllBands || mode == .fcc || mode == .rcc || mode == .bandGreen, let gURL = greenURL {
                 green = try? await cogReader.readRegion(url: gURL, pixelBounds: pixelBounds, authHeaders: authHeaders, requestSigner: requestSigner)
             }
-            if mode == .rcc || mode == .bandBlue, let bURL = blueURL {
+            if loadAllBands || mode == .rcc || mode == .bandBlue, let bURL = blueURL {
                 blue = try? await cogReader.readRegion(url: bURL, pixelBounds: pixelBounds, authHeaders: authHeaders, requestSigner: requestSigner)
             }
 
@@ -1122,7 +1179,9 @@ class NDVIProcessor {
                 pixelBounds: pixelBounds,
                 sourceID: sourceID,
                 sceneID: item.id,
-                dnOffset: dnOffset
+                dnOffset: dnOffset,
+                processingBaseline: item.properties.processingBaseline,
+                productURI: item.properties.productURI
             )
         } catch let cogErr as COGError {
             // Rethrow HTTP errors so caller can retry from alternate source

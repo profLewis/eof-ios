@@ -142,11 +142,12 @@ struct SelectionAnalysisView: View {
                 for col in cMin...min(cMax, frame.width - 1) {
                     let ndvi = frame.ndvi[row][col]
                     guard !ndvi.isNaN else { continue }
-                    rSum += Double(frame.redBand[row][col]) / 10000
-                    nSum += Double(frame.nirBand[row][col]) / 10000
+                    let ofs = Double(frame.dnOffset)
+                    rSum += (Double(frame.redBand[row][col]) + ofs) / 10000
+                    nSum += (Double(frame.nirBand[row][col]) + ofs) / 10000
                     count += 1
-                    if let g = frame.greenBand { gSum += Double(g[row][col]) / 10000; gCount += 1 }
-                    if let b = frame.blueBand { bSum += Double(b[row][col]) / 10000; bCount += 1 }
+                    if let g = frame.greenBand { gSum += (Double(g[row][col]) + ofs) / 10000; gCount += 1 }
+                    if let b = frame.blueBand { bSum += (Double(b[row][col]) + ofs) / 10000; bCount += 1 }
                 }
             }
             guard count > 0 else { continue }

@@ -38,6 +38,7 @@ struct ContentView: View {
     @State private var showBadData = false
     @State private var tappedPixelDetail: PixelPhenology?
     @State private var showingPixelDetail = false
+    @State private var showingSourceComparison = false
     // Sub-AOI selection
     @State private var isSelectMode = false
     @State private var selectionStart: CGPoint?
@@ -83,6 +84,12 @@ struct ContentView: View {
             .onChange(of: processor.status) {
                 // Auto-play when loading finishes
                 if processor.status == .done && !processor.frames.isEmpty && !isPlaying {
+                    // Show comparison results if in compare mode
+                    if processor.compareSourcesMode && !processor.comparisonPairs.isEmpty {
+                        processor.compareSourcesMode = false
+                        showingSourceComparison = true
+                        return
+                    }
                     currentFrameIndex = 0
                     togglePlayback()
                     // Load basemap if enabled
@@ -196,7 +203,9 @@ struct ContentView: View {
                     .presentationDetents([.large])
             }
             .sheet(isPresented: $showingSettings) {
-                SettingsView(isPresented: $showingSettings)
+                SettingsView(isPresented: $showingSettings, onCompare: {
+                    startComparisonFetch()
+                })
                     .presentationDetents([.large])
             }
             .sheet(isPresented: $showingClusterView) {
@@ -220,6 +229,10 @@ struct ContentView: View {
                     PixelDetailSheet(pixel: px, frames: processor.frames)
                         .presentationDetents([.medium])
                 }
+            }
+            .sheet(isPresented: $showingSourceComparison) {
+                SourceComparisonView(pairs: processor.comparisonPairs)
+                    .presentationDetents([.large])
             }
         }
     }
@@ -326,6 +339,17 @@ struct ContentView: View {
         }
         .buttonStyle(.glassProminent)
         .tint(.blue)
+    }
+
+    private var compareButton: some View {
+        Button(action: startComparisonFetch) {
+            Label("Compare Sources", systemImage: "arrow.triangle.2.circlepath")
+                .font(.subheadline)
+                .padding(8)
+                .frame(maxWidth: .infinity)
+        }
+        .buttonStyle(.glass)
+        .tint(.orange)
     }
 
     // MARK: - NDVI Display
@@ -626,11 +650,12 @@ struct ContentView: View {
 
     private func medianReflectance(band: [[UInt16]]?, frame: NDVIFrame) -> Double {
         guard let band = band else { return 0 }
+        let ofs = frame.dnOffset
         var vals = [Float]()
         for row in 0..<min(frame.height, band.count) {
             for col in 0..<min(frame.width, band[row].count) {
                 if !frame.ndvi[row][col].isNaN {  // only valid pixels
-                    vals.append(Float(band[row][col]) / 10000.0)
+                    vals.append((Float(band[row][col]) + ofs) / 10000.0)
                 }
             }
         }
@@ -1262,7 +1287,8 @@ struct ContentView: View {
             // Stage 1: initial robust fit on all data
             let initial = DoubleLogistic.ensembleFit(data: data,
                 perturbation: p, slopePerturbation: sp,
-                minSeasonLength: minSL, maxSeasonLength: maxSL)
+                minSeasonLength: minSL, maxSeasonLength: maxSL,
+                slopeSymmetry: Double(settings.slopeSymmetry))
 
             // Stage 2: identify outlier dates using MAD of residuals
             let residuals = data.map { pt in
@@ -1303,7 +1329,8 @@ struct ContentView: View {
                 // Stage 3: refit with clean data
                 let result = DoubleLogistic.ensembleFit(data: cleanData,
                     perturbation: p, slopePerturbation: sp,
-                    minSeasonLength: minSL, maxSeasonLength: maxSL)
+                    minSeasonLength: minSL, maxSeasonLength: maxSL,
+                slopeSymmetry: Double(settings.slopeSymmetry))
                 await MainActor.run {
                     dlBest = result.best
                     dlEnsemble = result.ensemble
@@ -1339,7 +1366,8 @@ struct ContentView: View {
             rmseThreshold: settings.pixelFitRMSEThreshold,
             minObservations: settings.pixelMinObservations,
             minSeasonLength: Double(settings.minSeasonLength),
-            maxSeasonLength: Double(settings.maxSeasonLength)
+            maxSeasonLength: Double(settings.maxSeasonLength),
+            slopeSymmetry: Double(settings.slopeSymmetry)
         )
 
         logDistributions(label: "Per-pixel DL fit", base: medianFit, p: settings.pixelPerturbation,
@@ -1403,7 +1431,8 @@ struct ContentView: View {
         Task.detached {
             let result = DoubleLogistic.ensembleFit(data: data,
                 perturbation: p, slopePerturbation: sp,
-                minSeasonLength: minSL, maxSeasonLength: maxSL)
+                minSeasonLength: minSL, maxSeasonLength: maxSL,
+                slopeSymmetry: Double(settings.slopeSymmetry))
             await MainActor.run {
                 dlBest = result.best
                 dlSliders = result.best
@@ -1432,7 +1461,8 @@ struct ContentView: View {
         Task.detached {
             let result = DoubleLogistic.ensembleFit(data: data,
                 perturbation: p, slopePerturbation: sp,
-                minSeasonLength: minSL, maxSeasonLength: maxSL)
+                minSeasonLength: minSL, maxSeasonLength: maxSL,
+                slopeSymmetry: Double(settings.slopeSymmetry))
             await MainActor.run {
                 dlBest = result.best
                 dlSliders = result.best
@@ -1453,14 +1483,16 @@ struct ContentView: View {
         let maxSL = Double(settings.maxSeasonLength)
         Task.detached {
             let fitted = DoubleLogistic.fit(data: data, initial: start,
-                                           minSeasonLength: minSL, maxSeasonLength: maxSL)
+                                           minSeasonLength: minSL, maxSeasonLength: maxSL,
+                slopeSymmetry: Double(settings.slopeSymmetry))
             await MainActor.run {
                 dlBest = fitted
                 dlSliders = fitted
                 // Re-run ensemble from this better starting point
                 let result = DoubleLogistic.ensembleFit(data: data,
                     perturbation: p, slopePerturbation: sp,
-                    minSeasonLength: minSL, maxSeasonLength: maxSL)
+                    minSeasonLength: minSL, maxSeasonLength: maxSL,
+                slopeSymmetry: Double(settings.slopeSymmetry))
                 dlEnsemble = result.ensemble
                 if result.best.rmse < fitted.rmse {
                     dlBest = result.best
@@ -1610,6 +1642,14 @@ struct ContentView: View {
                 endDate: settings.endDateString
             )
         }
+    }
+
+    private func startComparisonFetch() {
+        stopPlayback()
+        log.clear()
+        processor.compareSourcesMode = true
+        processor.comparisonPairs = []
+        startFetch()
     }
 
     private func resetAndFetch() {

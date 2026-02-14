@@ -69,6 +69,8 @@ class AppSettings {
     var clusterFilterThreshold: Double = 4.0 { didSet { save() } }
     var minSeasonLength: Int = 30 { didSet { save() } }
     var maxSeasonLength: Int = 150 { didSet { save() } }
+    /// Max % difference between green-up (rsp) and senescence (rau) rates. 0 = no constraint.
+    var slopeSymmetry: Int = 20 { didSet { save() } }
 
     /// SCL classes to treat as VALID (not masked). User can toggle each.
     var sclValidClasses: Set<Int> = [4, 5] { didSet { save() } }
@@ -196,6 +198,7 @@ class AppSettings {
         defaults.set(clusterFilterThreshold, forKey: prefix + "clusterFilterThreshold")
         defaults.set(minSeasonLength, forKey: prefix + "minSeasonLength")
         defaults.set(maxSeasonLength, forKey: prefix + "maxSeasonLength")
+        defaults.set(slopeSymmetry, forKey: prefix + "slopeSymmetry")
         defaults.set(vegetationIndex.rawValue, forKey: prefix + "vegetationIndex")
         defaults.set(smartAllocation, forKey: prefix + "smartAllocation")
     }
@@ -254,6 +257,8 @@ class AppSettings {
         if msl > 0 { minSeasonLength = msl }
         let mxl = defaults.integer(forKey: prefix + "maxSeasonLength")
         if mxl > 0 { maxSeasonLength = mxl }
+        let ss = defaults.integer(forKey: prefix + "slopeSymmetry")
+        if ss > 0 { slopeSymmetry = ss }
         if let viRaw = defaults.string(forKey: prefix + "vegetationIndex"),
            let vi = VegetationIndex(rawValue: viRaw) {
             vegetationIndex = vi
@@ -267,8 +272,14 @@ class AppSettings {
             // Merge: use saved state for known sources, append any new defaults not in saved
             let allDefaults: [STACSourceConfig] = [.planetaryDefault(), .awsDefault(), .cdseDefault(), .earthdataDefault(), .geeDefault()]
             var merged = saved
+            // Update code-controlled fields (URLs, band mappings) from defaults while preserving user preferences (isEnabled, order)
             for def in allDefaults {
-                if !merged.contains(where: { $0.sourceID == def.sourceID }) {
+                if let idx = merged.firstIndex(where: { $0.sourceID == def.sourceID }) {
+                    merged[idx].searchURL = def.searchURL
+                    merged[idx].collection = def.collection
+                    merged[idx].bandMapping = def.bandMapping
+                    merged[idx].assetAuthType = def.assetAuthType
+                } else {
                     merged.append(def)
                 }
             }
