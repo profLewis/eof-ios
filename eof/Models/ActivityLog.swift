@@ -1,5 +1,6 @@
 import Foundation
 import Observation
+import os.log
 
 @Observable
 class ActivityLog {
@@ -27,8 +28,12 @@ class ActivityLog {
         }
     }
 
+    private static let osLog = OSLog(subsystem: "uk.ac.ucl.eof", category: "app")
+
     func log(_ message: String, level: LogEntry.Level = .info) {
         let entry = LogEntry(timestamp: Date(), message: message, level: level)
+        let logType: OSLogType = level == .error ? .error : level == .warning ? .fault : .default
+        os_log("%{public}@ %{public}@", log: Self.osLog, type: logType, level.rawValue, message)
         if Thread.isMainThread {
             entries.append(entry)
         } else {
