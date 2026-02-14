@@ -317,9 +317,12 @@ class NDVIProcessor {
                         httpErrorCount += 1
                         if let alts = candidatesByKey[dateKey],
                            alts.contains(where: { $0.1.sourceID != failedSrc }) {
-                            log.warn("\(dateKey): \(failedSrc.rawValue.uppercased()) HTTP \(code), will retry from alternate")
+                            let reason = code > 0 ? "HTTP \(code)" : "failed"
+                            log.warn("\(dateKey): \(failedSrc.rawValue.uppercased()) \(reason), will retry from alternate")
                             retryQueue.append((key: dateKey, excludeSource: failedSrc))
                             totalItems += 1
+                        } else if code == 0 {
+                            log.warn("\(dateKey): \(failedSrc.rawValue.uppercased()) failed, no alternate available")
                         }
                         if code == 403 {
                             if httpErrorCount == 1 {
@@ -397,16 +400,14 @@ class NDVIProcessor {
                             return .success(frame, slot, cfg.sourceID, CFAbsoluteTimeGetCurrent() - t0)
                         } catch let err as COGError {
                             let elapsed = CFAbsoluteTimeGetCurrent() - t0
-                            switch err {
-                            case .httpError(let code):
+                            if case .httpError(let code) = err {
                                 return .httpFailed(dateKey, cfg.sourceID, code, slot, elapsed)
-                            case .missingTransform:
-                                return .httpFailed(dateKey, cfg.sourceID, 0, slot, elapsed)
-                            default:
-                                return .success(nil, slot, cfg.sourceID, elapsed)
                             }
+                            // Any COG error → retry from alternate source
+                            return .httpFailed(dateKey, cfg.sourceID, 0, slot, elapsed)
                         } catch {
-                            return .success(nil, slot, cfg.sourceID, CFAbsoluteTimeGetCurrent() - t0)
+                            // Any other error → retry from alternate source
+                            return .httpFailed(dateKey, cfg.sourceID, 0, slot, CFAbsoluteTimeGetCurrent() - t0)
                         }
                     }
                     running += 1
