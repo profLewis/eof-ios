@@ -211,38 +211,40 @@ struct SourceComparisonView: View {
 
     @ViewBuilder
     private func perDateTable(srcA: String, srcB: String, pairs: [ComparisonPair]) -> some View {
-        Text("Per-date: NDVI, processing version")
+        Text("Per-date: NDVI, offset, processing baseline")
             .font(.caption.bold())
             .padding(.horizontal)
 
         VStack(spacing: 2) {
             HStack(spacing: 3) {
-                Text("Date").font(.caption2.bold()).frame(width: 70, alignment: .leading)
-                Text(srcA).font(.caption2.bold()).frame(width: 38, alignment: .trailing)
-                Text(srcB).font(.caption2.bold()).frame(width: 38, alignment: .trailing)
-                Text("\u{0394}").font(.caption2.bold()).frame(width: 34, alignment: .trailing)
-                Text("PB-A").font(.caption2.bold()).frame(width: 34, alignment: .trailing)
-                Text("PB-B").font(.caption2.bold()).frame(width: 34, alignment: .trailing)
-                Text("ver").font(.caption2.bold()).frame(width: 20, alignment: .center)
+                Text("Date").font(.caption2.bold()).frame(width: 62, alignment: .leading)
+                Text(srcA).font(.caption2.bold()).frame(width: 36, alignment: .trailing)
+                Text(srcB).font(.caption2.bold()).frame(width: 36, alignment: .trailing)
+                Text("\u{0394}").font(.caption2.bold()).frame(width: 32, alignment: .trailing)
+                Text("ofs-\(srcA.prefix(1))").font(.caption2.bold()).frame(width: 34, alignment: .trailing)
+                Text("ofs-\(srcB.prefix(1))").font(.caption2.bold()).frame(width: 34, alignment: .trailing)
+                Text("PB").font(.caption2.bold()).frame(width: 28, alignment: .trailing)
             }
             .foregroundStyle(.secondary)
 
             ForEach(Array(pairs.enumerated()), id: \.element.id) { _, pair in
                 let diff = pair.frameA.medianNDVI - pair.frameB.medianNDVI
+                let ofsA = pair.frameA.dnOffset
+                let ofsB = pair.frameB.dnOffset
                 let pbA = pair.frameA.processingBaseline ?? "?"
                 let pbB = pair.frameB.processingBaseline ?? "?"
-                let versionMatch = pbA == pbB
                 HStack(spacing: 3) {
-                    Text(pair.dateString).font(.caption2.monospacedDigit()).frame(width: 70, alignment: .leading)
-                    Text(String(format: "%.3f", pair.frameA.medianNDVI)).font(.caption2.monospacedDigit()).frame(width: 38, alignment: .trailing)
-                    Text(String(format: "%.3f", pair.frameB.medianNDVI)).font(.caption2.monospacedDigit()).frame(width: 38, alignment: .trailing)
-                    Text(String(format: "%+.3f", diff)).font(.caption2.monospacedDigit()).frame(width: 34, alignment: .trailing)
+                    Text(pair.dateString).font(.caption2.monospacedDigit()).frame(width: 62, alignment: .leading)
+                    Text(String(format: "%.3f", pair.frameA.medianNDVI)).font(.caption2.monospacedDigit()).frame(width: 36, alignment: .trailing)
+                    Text(String(format: "%.3f", pair.frameB.medianNDVI)).font(.caption2.monospacedDigit()).frame(width: 36, alignment: .trailing)
+                    Text(String(format: "%+.3f", diff)).font(.caption2.monospacedDigit()).frame(width: 32, alignment: .trailing)
                         .foregroundStyle(abs(diff) > 0.02 ? Color.red : Color.secondary)
-                    Text(pbA).font(.caption2.monospacedDigit()).frame(width: 34, alignment: .trailing)
-                    Text(pbB).font(.caption2.monospacedDigit()).frame(width: 34, alignment: .trailing)
-                        .foregroundStyle(versionMatch ? Color.primary : Color.red)
-                    Text(versionMatch ? "\u{2713}" : "\u{2717}").font(.caption2).frame(width: 20, alignment: .center)
-                        .foregroundStyle(versionMatch ? Color.green : Color.red)
+                    Text(String(format: "%.0f", ofsA)).font(.caption2.monospacedDigit()).frame(width: 34, alignment: .trailing)
+                        .foregroundStyle(ofsA != 0 ? Color.orange : Color.secondary)
+                    Text(String(format: "%.0f", ofsB)).font(.caption2.monospacedDigit()).frame(width: 34, alignment: .trailing)
+                        .foregroundStyle(ofsB != 0 ? Color.orange : Color.secondary)
+                    Text("\(pbA)/\(pbB)").font(.system(size: 8).monospacedDigit()).frame(width: 28, alignment: .trailing)
+                        .foregroundStyle(pbA == pbB ? Color.secondary : Color.red)
                 }
             }
         }
