@@ -98,7 +98,7 @@ class AppSettings {
     var pixelInspectWindow: Int = 1 { didSet { save() } }
 
     /// Minimum fractional pixel coverage within AOI to include (0.01 = 1%)
-    var pixelCoverageThreshold: Double = 0.01 { didSet { save() } }
+    var pixelCoverageThreshold: Double = 0.49 { didSet { save() } }
 
     /// SCL classes to treat as VALID (not masked). User can toggle each.
     var sclValidClasses: Set<Int> = [4, 5] { didSet { save() } }

@@ -360,8 +360,29 @@ struct ContentView: View {
                 }
             case .done:
                 HStack {
-                    Label(processor.progressMessage, systemImage: "checkmark.circle.fill")
-                        .foregroundStyle(.green)
+                    Button("Fit") {
+                        runDLFit()
+                    }
+                    .font(.caption)
+                    .buttonStyle(.bordered)
+                    .tint(.yellow)
+                    Button(isRunningPixelFit ? "Stop" : "Per-Pixel") {
+                        if isRunningPixelFit {
+                            pixelFitTask?.cancel()
+                            pixelFitTask = nil
+                            isRunningPixelFit = false
+                        } else {
+                            runPerPixelFit()
+                        }
+                    }
+                    .font(.caption)
+                    .buttonStyle(.bordered)
+                    .tint(isRunningPixelFit ? .red : (pixelPhenology == nil ? .orange : (pixelFitIsStale ? .green : .red)))
+                    .disabled(dlBest == nil && !isRunningPixelFit)
+                    if pixelPhenology != nil {
+                        liveMenu
+                    }
+                    Spacer()
                     if !processor.cachedFrames.isEmpty {
                         Button {
                             processor.revertToCached()
@@ -372,12 +393,6 @@ struct ContentView: View {
                         }
                         .buttonStyle(.bordered)
                         .tint(.orange)
-                    }
-                }
-                .task {
-                    try? await Task.sleep(for: .seconds(5))
-                    if processor.status == .done {
-                        processor.progressMessage = ""
                     }
                 }
             case .error:
@@ -1115,6 +1130,10 @@ struct ContentView: View {
 
                     spectralChartContent(current: current, sorted: sorted)
                 }
+                .task {
+                    // Ensure green and blue bands are loaded for the spectral plot
+                    await processor.loadMissingBands(for: .rcc)
+                }
             } else if !showSpectralChart && processor.frames.count > 1 {
                 Button {
                     showSpectralChart = true
@@ -1487,7 +1506,6 @@ struct ContentView: View {
             return cal.date(from: DateComponents(year: yr, day: doy))
         }
 
-        let isPoor = px.fitQuality != .good
         let pxID = "\(inspectedPixelRow)_\(inspectedPixelCol)"
         return stride(from: cdoyFirst, through: cdoyLast, by: step).compactMap { cdoy in
             guard let d = dateForCDOY(cdoy) else { return nil }
@@ -1495,8 +1513,8 @@ struct ContentView: View {
                 id: "pixdl_\(pxID)_\(cdoy)", date: d,
                 ndvi: px.params.evaluate(t: Double(cdoy)),
                 series: "DL-pixel-\(pxID)",
-                color: .blue.opacity(isPoor ? 0.5 : 0.9),
-                style: StrokeStyle(lineWidth: 3, dash: [6, 3])
+                color: .cyan,
+                style: StrokeStyle(lineWidth: 2.5, dash: [6, 3])
             )
         }
     }
@@ -1512,6 +1530,63 @@ struct ContentView: View {
             let generator = UIImpactFeedbackGenerator(style: .medium)
             generator.impactOccurred()
         }
+    }
+
+    // MARK: - Live Menu (parameter map selector)
+
+    private var liveMenu: some View {
+        Menu {
+            Button {
+                phenologyDisplayParam = nil
+                showBadData = false
+                startPlayback()
+            } label: {
+                if phenologyDisplayParam == nil && !showBadData {
+                    Label("Live", systemImage: "checkmark")
+                } else {
+                    Text("Live")
+                }
+            }
+            Divider()
+            ForEach(PhenologyParameter.allCases, id: \.self) { param in
+                Button {
+                    phenologyDisplayParam = param
+                    showBadData = false
+                    stopPlayback()
+                } label: {
+                    if phenologyDisplayParam == param && !showBadData {
+                        Label(param.rawValue, systemImage: "checkmark")
+                    } else {
+                        Text(param.rawValue)
+                    }
+                }
+            }
+            Divider()
+            Button {
+                showBadData = true
+                phenologyDisplayParam = nil
+                stopPlayback()
+            } label: {
+                if showBadData {
+                    Label("Bad Data", systemImage: "checkmark")
+                } else {
+                    Text("Bad Data")
+                }
+            }
+        } label: {
+            HStack(spacing: 4) {
+                Image(systemName: showBadData ? "exclamationmark.triangle.fill" : "map.fill")
+                    .font(.system(size: 11))
+                Text(showBadData ? "Bad Data" : (phenologyDisplayParam?.rawValue ?? "Live"))
+                    .font(.system(size: 11, weight: .semibold))
+                Image(systemName: "chevron.up.chevron.down")
+                    .font(.system(size: 8))
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 5)
+            .background(.ultraThinMaterial, in: Capsule())
+        }
+        .tint(showBadData ? .red : (phenologyDisplayParam != nil ? .orange : .green))
     }
 
     // MARK: - Phenology (Double Logistic)
@@ -1540,25 +1615,6 @@ struct ContentView: View {
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
-                Button("Fit") {
-                    runDLFit()
-                }
-                .font(.caption)
-                .buttonStyle(.bordered)
-                .tint(.yellow)
-                Button(isRunningPixelFit ? "Stop" : "Per-Pixel") {
-                    if isRunningPixelFit {
-                        pixelFitTask?.cancel()
-                        pixelFitTask = nil
-                        isRunningPixelFit = false
-                    } else {
-                        runPerPixelFit()
-                    }
-                }
-                .font(.caption)
-                .buttonStyle(.bordered)
-                .tint(isRunningPixelFit ? .red : (pixelPhenology == nil ? .orange : (pixelFitIsStale ? .green : .red)))
-                .disabled(dlBest == nil && !isRunningPixelFit)
             }
 
             // Per-pixel progress
@@ -1596,61 +1652,8 @@ struct ContentView: View {
                         pixelPhenology = base.reclassified(rmseThreshold: settings.pixelFitRMSEThreshold)
                     }
 
-                // Parameter map selector + cluster filter + analysis
+                // Cluster filter + analysis
                 HStack(spacing: 6) {
-                    Menu {
-                        Button {
-                            phenologyDisplayParam = nil
-                            showBadData = false
-                            startPlayback()
-                        } label: {
-                            if phenologyDisplayParam == nil && !showBadData {
-                                Label("Live", systemImage: "checkmark")
-                            } else {
-                                Text("Live")
-                            }
-                        }
-                        Divider()
-                        ForEach(PhenologyParameter.allCases, id: \.self) { param in
-                            Button {
-                                phenologyDisplayParam = param
-                                showBadData = false
-                                stopPlayback()
-                            } label: {
-                                if phenologyDisplayParam == param && !showBadData {
-                                    Label(param.rawValue, systemImage: "checkmark")
-                                } else {
-                                    Text(param.rawValue)
-                                }
-                            }
-                        }
-                        Divider()
-                        Button {
-                            showBadData = true
-                            phenologyDisplayParam = nil
-                            stopPlayback()
-                        } label: {
-                            if showBadData {
-                                Label("Bad Data", systemImage: "checkmark")
-                            } else {
-                                Text("Bad Data")
-                            }
-                        }
-                    } label: {
-                        HStack(spacing: 4) {
-                            Image(systemName: showBadData ? "exclamationmark.triangle.fill" : "map.fill")
-                                .font(.system(size: 11))
-                            Text(showBadData ? "Bad Data" : (phenologyDisplayParam?.rawValue ?? "Live"))
-                                .font(.system(size: 11, weight: .semibold))
-                            Image(systemName: "chevron.up.chevron.down")
-                                .font(.system(size: 8))
-                        }
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 5)
-                        .background(.ultraThinMaterial, in: Capsule())
-                    }
-                    .tint(showBadData ? .red : (phenologyDisplayParam != nil ? .orange : .green))
-
                     Toggle("Cluster Filter", isOn: Binding(
                         get: { isClusterFiltered },
                         set: { newValue in
@@ -2319,9 +2322,8 @@ struct ContentView: View {
 
         // Expand bbox to match frame aspect ratio (the chip is always larger)
         // The processor adds ~10% buffer on each side, so add ~25% total padding
-        let padFactor = 1.25
-        let adjustedLatSpan = max(aoiLatSpan, aoiLonSpan / frameAspect) * padFactor
-        let adjustedLonSpan = max(aoiLonSpan, aoiLatSpan * frameAspect) * padFactor
+        let adjustedLatSpan = max(aoiLatSpan, aoiLonSpan / frameAspect)
+        let adjustedLonSpan = max(aoiLonSpan, aoiLatSpan * frameAspect)
 
         let center = CLLocationCoordinate2D(latitude: centerLat, longitude: centerLon)
         let span = MKCoordinateSpan(latitudeDelta: adjustedLatSpan, longitudeDelta: adjustedLonSpan)
