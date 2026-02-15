@@ -42,7 +42,41 @@ No data is sent to these services beyond the minimum required for search queries
 
 ## Credential Export/Import
 
-The app offers an optional credential export feature. Exported files are encrypted and protected with iOS `FileProtectionComplete`. You are responsible for the security of exported credential files.
+The app offers an optional credential export feature:
+
+- Credentials are serialised as JSON, compressed with zlib, then encrypted with AES-256-GCM using a key derived from a user-supplied passphrase (PBKDF2, 100k iterations, random salt).
+- The exported `.eofcred` file contains: 16-byte salt, 12-byte nonce, 16-byte GCM tag, and the ciphertext. It is also protected with iOS `FileProtectionComplete` on device.
+- **You are responsible for the security of exported credential files and your passphrase.**
+
+To decrypt an exported `.eofcred` file outside the app (e.g. for backup recovery), you can use the following Python script:
+
+```python
+#!/usr/bin/env python3
+"""Decrypt an eof .eofcred credential file."""
+import sys, zlib, json, getpass
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+from cryptography.hazmat.primitives import hashes
+
+def decrypt_eofcred(path, passphrase):
+    data = open(path, "rb").read()
+    salt, nonce, tag = data[:16], data[16:28], data[28:44]
+    ciphertext = data[44:]
+    kdf = PBKDF2HMAC(algorithm=hashes.SHA256(), length=32,
+                      salt=salt, iterations=100_000)
+    key = kdf.derive(passphrase.encode())
+    plaintext = AESGCM(key).decrypt(nonce, ciphertext + tag, None)
+    return json.loads(zlib.decompress(plaintext))
+
+if __name__ == "__main__":
+    path = sys.argv[1] if len(sys.argv) > 1 else input("Path to .eofcred: ")
+    pw = getpass.getpass("Passphrase: ")
+    creds = decrypt_eofcred(path, pw)
+    for k, v in creds.items():
+        print(f"  {k}: {v}")
+```
+
+Requires: `pip install cryptography`
 
 ## Third-Party Data Sharing
 

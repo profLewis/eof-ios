@@ -132,9 +132,29 @@ enum CropMapSource: String, CaseIterable, Identifiable {
         CropFieldSample(lat: 14.35, lon: 100.57, crop: "Rice", region: "Central Plain, Thailand", plantingMonth: 5, harvestMonth: 11),
     ]
 
-    /// Pick a random field from this source with slight jitter.
-    func randomField() -> CropFieldSample {
-        let base = samples.randomElement()!
+    /// Unique crop names available in this region.
+    var availableCrops: [String] {
+        Array(Set(samples.map { $0.crop })).sorted()
+    }
+
+    /// Typical field width (meters) for this region. Varies with agricultural practice.
+    var typicalFieldWidth: Double {
+        switch self {
+        case .usaCDL: return 500       // large US pivot/row-crop fields
+        case .brazil: return 600       // large mechanised farms
+        case .australia: return 500
+        case .euCropMap: return 300    // smaller European parcels
+        case .southAfrica: return 400
+        case .india: return 200        // small-holder dominated
+        case .china: return 250
+        case .global: return 350
+        }
+    }
+
+    /// Pick a random field from this source, optionally filtered by crop.
+    func randomField(crop: String? = nil) -> CropFieldSample {
+        let pool = crop == nil ? samples : samples.filter { $0.crop == crop }
+        let base = pool.randomElement() ?? samples.randomElement() ?? samples[0]
         let jitterLat = Double.random(in: -0.005...0.005)
         let jitterLon = Double.random(in: -0.005...0.005)
         return CropFieldSample(
@@ -147,23 +167,63 @@ enum CropMapSource: String, CaseIterable, Identifiable {
         )
     }
 
+    /// Generate a field polygon (rectangular, slightly rotated) for a sample.
+    func fieldPolygon(for sample: CropFieldSample) -> [(lat: Double, lon: Double)] {
+        let w = typicalFieldWidth
+        let aspect = Double.random(in: 1.2...2.0) // fields are usually longer than wide
+        let halfW = w / 2.0
+        let halfH = (w * aspect) / 2.0
+        let rotation = Double.random(in: -30...30) * .pi / 180 // slight rotation
+
+        let metersPerDegLat = 111_320.0
+        let metersPerDegLon = 111_320.0 * cos(sample.lat * .pi / 180.0)
+
+        // Corner offsets in meters, then rotate
+        let corners: [(dx: Double, dy: Double)] = [
+            (-halfW, -halfH), (halfW, -halfH), (halfW, halfH), (-halfW, halfH)
+        ]
+        return corners.map { c in
+            let rx = c.dx * cos(rotation) - c.dy * sin(rotation)
+            let ry = c.dx * sin(rotation) + c.dy * cos(rotation)
+            return (lat: sample.lat + ry / metersPerDegLat, lon: sample.lon + rx / metersPerDegLon)
+        }
+    }
+
+    /// Find the nearest crop field sample within a given radius (km) of a coordinate.
+    static func nearestField(lat: Double, lon: Double, radiusKm: Double = 50) -> (sample: CropFieldSample, source: CropMapSource, distKm: Double)? {
+        var best: (sample: CropFieldSample, source: CropMapSource, distKm: Double)?
+        for source in CropMapSource.allCases {
+            for sample in source.samples {
+                let dLat = (sample.lat - lat) * 111.32
+                let dLon = (sample.lon - lon) * 111.32 * cos(lat * .pi / 180)
+                let dist = sqrt(dLat * dLat + dLon * dLon)
+                if dist <= radiusKm {
+                    if best == nil || dist < best!.distKm {
+                        best = (sample, source, dist)
+                    }
+                }
+            }
+        }
+        return best
+    }
+
     /// Compute date range covering the growing season with 1-month padding.
-    static func dateRange(plantingMonth: Int, harvestMonth: Int) -> (start: Date, end: Date) {
+    static func dateRange(plantingMonth: Int, harvestMonth: Int, year: Int? = nil) -> (start: Date, end: Date) {
         let cal = Calendar.current
-        let thisYear = cal.component(.year, from: Date())
-        // Use last full season
-        let year = thisYear - 1
+        let yr = year ?? (cal.component(.year, from: Date()) - 1)
 
         let startMonth = plantingMonth > 1 ? plantingMonth - 1 : 12
-        let startYear = plantingMonth > 1 ? year : year - 1
+        let startYear = plantingMonth > 1 ? yr : yr - 1
 
         let endMonth = harvestMonth < 12 ? harvestMonth + 1 : 1
         let crossesYearBoundary = harvestMonth < plantingMonth
-        let endYear = crossesYearBoundary ? year + 1 : year
+        let endYear = crossesYearBoundary ? yr + 1 : yr
         let adjustedEndYear = harvestMonth < 12 ? endYear : endYear + 1
 
-        let start = cal.date(from: DateComponents(year: startYear, month: startMonth, day: 1))!
-        let end = cal.date(from: DateComponents(year: adjustedEndYear, month: endMonth, day: 28))!
+        let start = cal.date(from: DateComponents(year: startYear, month: startMonth, day: 1))
+            ?? Date(timeIntervalSince1970: 0)
+        let end = cal.date(from: DateComponents(year: adjustedEndYear, month: endMonth, day: 28))
+            ?? Date()
         return (start, end)
     }
 }

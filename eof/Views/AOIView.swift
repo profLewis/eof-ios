@@ -50,6 +50,11 @@ struct AOIView: View {
 
     // Crop map random field
     @State private var selectedCropMap: CropMapSource = .global
+    @State private var selectedCrop: String = "Any"
+    @State private var selectedYear: Int = Calendar.current.component(.year, from: Date()) - 1
+    @State private var lastCropSample: CropFieldSample?
+    @State private var showFieldOverlays: Bool = true
+    @State private var nearbyFieldInfo: String?
 
     // Import sheet
     @State private var showingImport = false
@@ -153,6 +158,27 @@ struct AOIView: View {
     private var mapView: some View {
         MapReader { proxy in
             Map(position: $cameraPosition, interactionModes: drawMode == .rectangle ? [] : .all) {
+                // Crop field overlays from database
+                if showFieldOverlays {
+                    let filteredSamples = cropFieldsForMap
+                    ForEach(Array(filteredSamples.enumerated()), id: \.offset) { _, sample in
+                        let verts = selectedCropMap.fieldPolygon(for: sample)
+                        let coords = verts.map { CLLocationCoordinate2D(latitude: $0.lat, longitude: $0.lon) }
+                        MapPolygon(coordinates: coords)
+                            .foregroundStyle(.orange.opacity(0.25))
+                            .stroke(.orange, lineWidth: 1.5)
+                        Annotation("", coordinate: CLLocationCoordinate2D(latitude: sample.lat, longitude: sample.lon)) {
+                            Text(sample.crop)
+                                .font(.system(size: 8).bold())
+                                .foregroundStyle(.white)
+                                .padding(.horizontal, 3)
+                                .padding(.vertical, 1)
+                                .background(.orange.opacity(0.8), in: RoundedRectangle(cornerRadius: 3))
+                                .onTapGesture { selectCropField(sample) }
+                        }
+                    }
+                }
+
                 // Current AOI polygon (green) — only in view mode with edit vertices
                 if drawMode == .view, editVertices.count >= 3 {
                     MapPolygon(coordinates: editVertices)
@@ -468,11 +494,68 @@ struct AOIView: View {
                 Spacer()
             }
 
-            // Random crop field
-            HStack(spacing: 6) {
-                Picker("Crop Map", selection: $selectedCropMap) {
+            // Nearby field info (shown when user manually selects near a known crop area)
+            if let info = nearbyFieldInfo {
+                HStack(spacing: 4) {
+                    Image(systemName: "leaf.circle.fill")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.orange)
+                    Text(info)
+                        .font(.system(size: 9))
+                        .foregroundStyle(.orange)
+                    Spacer()
+                    if let sample = lastCropSample {
+                        Button {
+                            let dates = CropMapSource.dateRange(
+                                plantingMonth: sample.plantingMonth,
+                                harvestMonth: sample.harvestMonth,
+                                year: selectedYear
+                            )
+                            settings.startDate = dates.start
+                            settings.endDate = dates.end
+                            clearMessages()
+                            let fmt = DateFormatter()
+                            fmt.dateFormat = "d MMM yyyy"
+                            successMessage = "Dates set: \(fmt.string(from: dates.start)) \u{2013} \(fmt.string(from: dates.end))"
+                        } label: {
+                            Text("Set Dates")
+                                .font(.system(size: 9).bold())
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.mini)
+                    }
+                }
+            }
+
+            // Random crop field: region + crop + year + go
+            HStack(spacing: 4) {
+                Picker("Region", selection: $selectedCropMap) {
                     ForEach(CropMapSource.allCases) { source in
                         Text(source.rawValue).tag(source)
+                    }
+                }
+                .pickerStyle(.menu)
+                .font(.caption)
+                .fixedSize()
+                .onChange(of: selectedCropMap) {
+                    // Reset crop filter when region changes
+                    selectedCrop = "Any"
+                }
+
+                Picker("Crop", selection: $selectedCrop) {
+                    Text("Any").tag("Any")
+                    ForEach(selectedCropMap.availableCrops, id: \.self) { crop in
+                        Text(crop).tag(crop)
+                    }
+                }
+                .pickerStyle(.menu)
+                .font(.caption)
+                .fixedSize()
+
+                Picker("Year", selection: $selectedYear) {
+                    let thisYear = Calendar.current.component(.year, from: Date())
+                    ForEach((2017...thisYear).reversed(), id: \.self) { yr in
+                        Text(String(yr)).tag(yr)
                     }
                 }
                 .pickerStyle(.menu)
@@ -482,12 +565,57 @@ struct AOIView: View {
                 Button {
                     pickRandomField()
                 } label: {
-                    Label("Random Field", systemImage: "dice")
+                    Image(systemName: "dice")
                         .font(.caption)
                 }
                 .buttonStyle(.bordered)
 
+                Button {
+                    showFieldOverlays.toggle()
+                } label: {
+                    Image(systemName: showFieldOverlays ? "eye.fill" : "eye.slash")
+                        .font(.caption)
+                        .foregroundStyle(showFieldOverlays ? .orange : .secondary)
+                }
+                .buttonStyle(.bordered)
+
                 Spacer()
+            }
+
+            // Crop season info + set dates button
+            if let sample = lastCropSample {
+                let monthNames = Calendar.current.shortMonthSymbols
+                let sowM = monthNames[sample.plantingMonth - 1]
+                let harvM = monthNames[sample.harvestMonth - 1]
+                HStack(spacing: 4) {
+                    Image(systemName: "leaf")
+                        .font(.system(size: 9))
+                        .foregroundStyle(.green)
+                    Text("\(sample.crop), \(sample.region)")
+                        .font(.system(size: 9).bold())
+                    Text("Sow \(sowM) \u{2192} Harvest \(harvM)")
+                        .font(.system(size: 9))
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Button {
+                        let dates = CropMapSource.dateRange(
+                            plantingMonth: sample.plantingMonth,
+                            harvestMonth: sample.harvestMonth,
+                            year: selectedYear
+                        )
+                        settings.startDate = dates.start
+                        settings.endDate = dates.end
+                        let fmt = DateFormatter()
+                        fmt.dateFormat = "d MMM yyyy"
+                        clearMessages()
+                        successMessage = "Dates set: \(fmt.string(from: dates.start)) \u{2013} \(fmt.string(from: dates.end))"
+                    } label: {
+                        Text("Set Dates")
+                            .font(.system(size: 9).bold())
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.mini)
+                }
             }
 
             // Recent AOIs
@@ -577,6 +705,10 @@ struct AOIView: View {
         drawMode = .view
         clearMessages()
         successMessage = "Polygon created (\(editVertices.count) vertices)"
+        if let geo = settings.aoiGeometry {
+            let c = geo.centroid
+            checkNearbyField(lat: c.lat, lon: c.lon)
+        }
     }
 
     private func selectSearchResult(_ result: MKLocalSearchCompletion) {
@@ -625,6 +757,7 @@ struct AOIView: View {
         clearMessages()
         successMessage = "Rectangle applied"
         log.info("AOI: map rect \(String(format: "%.4f", minLat))-\(String(format: "%.4f", maxLat)), \(String(format: "%.4f", minLon))-\(String(format: "%.4f", maxLon))")
+        checkNearbyField(lat: (minLat + maxLat) / 2, lon: (minLon + maxLon) / 2)
     }
 
     private func requestMyLocation() {
@@ -648,6 +781,7 @@ struct AOIView: View {
                         center: coord,
                         latitudinalMeters: locationDiameter * 3, longitudinalMeters: locationDiameter * 3
                     ))
+                    checkNearbyField(lat: coord.latitude, lon: coord.longitude)
                     return
                 }
                 if let err = locationService.error {
@@ -659,34 +793,59 @@ struct AOIView: View {
         }
     }
 
-    private func pickRandomField() {
-        let sample = selectedCropMap.randomField()
-        let geometry = AOIGeometry.generate(
-            lat: sample.lat, lon: sample.lon,
-            diameter: 800, shape: .square
-        )
+    /// Crop fields to display on map (filtered by current crop selection).
+    private var cropFieldsForMap: [CropFieldSample] {
+        let all = selectedCropMap.samples
+        if selectedCrop == "Any" { return all }
+        return all.filter { $0.crop == selectedCrop }
+    }
+
+    private func selectCropField(_ sample: CropFieldSample) {
+        let verts = selectedCropMap.fieldPolygon(for: sample)
+        let geometry = AOIGeometry.fromVertices(verts)
         settings.aoiSource = .cropSample(crop: sample.crop, region: sample.region)
         settings.aoiGeometry = geometry
         settings.recordAOI()
         loadEditVertices(from: geometry)
+        lastCropSample = sample
 
-        // Set date range to cover the growing season
-        let dates = CropMapSource.dateRange(plantingMonth: sample.plantingMonth, harvestMonth: sample.harvestMonth)
+        let dates = CropMapSource.dateRange(
+            plantingMonth: sample.plantingMonth,
+            harvestMonth: sample.harvestMonth,
+            year: selectedYear
+        )
         settings.startDate = dates.start
         settings.endDate = dates.end
 
         let monthNames = Calendar.current.shortMonthSymbols
-        let startM = monthNames[sample.plantingMonth - 1]
-        let endM = monthNames[sample.harvestMonth - 1]
+        let sowM = monthNames[sample.plantingMonth - 1]
+        let harvM = monthNames[sample.harvestMonth - 1]
         clearMessages()
-        successMessage = "\(sample.crop) \u{2014} \(sample.region) (\(startM)\u{2013}\(endM))"
+        successMessage = "\(sample.crop) \u{2014} \(sample.region) (\(sowM)\u{2013}\(harvM) \(selectedYear))"
         drawMode = .view
 
-        // Fly to location
         cameraPosition = .region(MKCoordinateRegion(
             center: CLLocationCoordinate2D(latitude: sample.lat, longitude: sample.lon),
-            span: MKCoordinateSpan(latitudeDelta: 0.02, longitudeDelta: 0.02)
+            span: MKCoordinateSpan(latitudeDelta: 0.015, longitudeDelta: 0.015)
         ))
+    }
+
+    private func pickRandomField() {
+        let cropFilter = selectedCrop == "Any" ? nil : selectedCrop
+        let sample = selectedCropMap.randomField(crop: cropFilter)
+        selectCropField(sample)
+    }
+
+    /// Check if a manually selected location is near a known crop field and inform the user.
+    private func checkNearbyField(lat: Double, lon: Double) {
+        nearbyFieldInfo = nil
+        if let match = CropMapSource.nearestField(lat: lat, lon: lon) {
+            let monthNames = Calendar.current.shortMonthSymbols
+            let sowM = monthNames[match.sample.plantingMonth - 1]
+            let harvM = monthNames[match.sample.harvestMonth - 1]
+            nearbyFieldInfo = "Near \(match.source.rawValue): \(match.sample.crop), \(match.sample.region) (\(sowM)\u{2013}\(harvM)) \u{2014} \(String(format: "%.0f", match.distKm))km away"
+            lastCropSample = match.sample
+        }
     }
 
     private func flyToAOI() {

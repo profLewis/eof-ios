@@ -16,6 +16,25 @@ struct SettingsView: View {
     var body: some View {
         NavigationStack {
             Form {
+                Section {
+                    Button {
+                        showingAOI = true
+                    } label: {
+                        HStack {
+                            Label("Area of Interest", systemImage: "mappin.and.ellipse")
+                            Spacer()
+                            Text(settings.aoiSourceLabel)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                        }
+                    }
+                    if let geo = settings.aoiGeometry {
+                        LabeledContent("Extent", value: settings.aoiSummary)
+                            .font(.caption)
+                    }
+                }
+
                 Section("Visualization") {
                     Picker("Display", selection: $settings.displayMode) {
                         Text("NDVI").tag(AppSettings.DisplayMode.ndvi)
@@ -92,25 +111,6 @@ struct SettingsView: View {
                     Text("Bands")
                 } footer: {
                     Text("Only bands needed for the selected mode are downloaded. Cached bands are reused when switching modes.")
-                }
-
-                Section {
-                    Button {
-                        showingAOI = true
-                    } label: {
-                        HStack {
-                            Label("Area of Interest", systemImage: "mappin.and.ellipse")
-                            Spacer()
-                            Text(settings.aoiSourceLabel)
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                                .lineLimit(1)
-                        }
-                    }
-                    if let geo = settings.aoiGeometry {
-                        LabeledContent("Extent", value: settings.aoiSummary)
-                            .font(.caption)
-                    }
                 }
 
                 Section {
@@ -823,6 +823,32 @@ struct AboutView: View {
                     }
                 }
 
+                Section("Crop Field Database") {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Curated Crop Locations")
+                            .font(.subheadline.bold())
+                        Text("Representative agricultural field locations and growing seasons for 8 regions worldwide. Used for random field selection and crop calendar reference.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    .padding(.vertical, 2)
+                    Group {
+                        aboutCropSource("US Cropland Data Layer (CDL)", "USDA NASS. Annual crop-specific land cover, 30m resolution. 12 sample locations covering maize, wheat, soybean, cotton, rice, sunflower.")
+                        aboutCropSource("EU Crop Map (EUCROPMAP)", "JRC/Eurostat. Crop type mapping across EU member states. 10 sample locations covering wheat, barley, maize, potato, sunflower.")
+                        aboutCropSource("South Africa", "DAFF/ARC crop statistics. 6 sample locations covering wheat, maize, sugarcane, sorghum, sunflower.")
+                        aboutCropSource("India", "MoAFW crop statistics. 8 sample locations covering wheat, rice, sugarcane, cotton, soybean, mustard, groundnut.")
+                        aboutCropSource("China", "MARA/CAS crop statistics. 8 sample locations covering soybean, wheat, maize, rice, cotton, spring wheat.")
+                        aboutCropSource("Brazil", "IBGE/CONAB crop surveys. 6 sample locations covering soybean, maize, rice, cotton, coffee.")
+                        aboutCropSource("Australia", "ABARES crop reports. 6 sample locations covering wheat, sugarcane, barley, canola, potato.")
+                        aboutCropSource("Global (Mixed)", "FAO/national sources. 8 sample locations from Egypt, Kenya, Ethiopia, Argentina, Ukraine, Turkey, Pakistan, Thailand.")
+                    }
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Planting and harvest months are typical averages; actual dates vary by year and local conditions. Field coordinates are approximate centres of agricultural zones, not specific parcels.")
+                            .font(.system(size: 9))
+                            .foregroundStyle(.tertiary)
+                    }
+                }
+
                 Section("Copyright & License") {
                     VStack(alignment: .leading, spacing: 8) {
                         Text("Copernicus Sentinel Data")
@@ -899,6 +925,16 @@ struct AboutView: View {
                     .buttonStyle(.glass)
                 }
             }
+        }
+    }
+
+    private func aboutCropSource(_ title: String, _ detail: String) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(title)
+                .font(.caption.bold())
+            Text(detail)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
         }
     }
 }

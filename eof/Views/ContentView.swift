@@ -135,13 +135,13 @@ struct ContentView: View {
                     if settings.showBasemap && basemapImage == nil {
                         loadBasemap()
                     }
-                    // Auto-fit double logistic
-                    if processor.frames.count >= 4 {
-                        runDLFit()
-                    }
-                    // Auto-run spectral unmixing if FVC mode or enabled in settings
+                    // Auto-run unmixing first if FVC target (DL fit will follow after unmix completes)
                     if settings.vegetationIndex == .fvc || settings.enableSpectralUnmixing {
                         runUnmixing()
+                    }
+                    // Auto-fit — skip if FVC target (will fit after unmixing completes)
+                    if processor.frames.count >= 4 && settings.vegetationIndex != .fvc {
+                        runDLFit()
                     }
                 }
             }
@@ -180,6 +180,12 @@ struct ContentView: View {
                 // Recompute VI values from raw bands when switching NDVI↔DVI
                 if !processor.frames.isEmpty {
                     processor.recomputeVI()
+                }
+            }
+            .onChange(of: phenologyDisplayParam) {
+                // Refit DL when Live menu switches to/from a fraction display
+                if dlBest != nil && !frameUnmixResults.isEmpty {
+                    runDLFit()
                 }
             }
             .onChange(of: settings.aoiSourceLabel) {
@@ -290,6 +296,7 @@ struct ContentView: View {
             .sheet(isPresented: $showingLog) {
                 LogView(isPresented: $showingLog, processor: processor)
                     .presentationDetents([.large])
+                    .presentationDragIndicator(.hidden)
             }
             .sheet(isPresented: $showingSettings) {
                 SettingsView(isPresented: $showingSettings, onCompare: {
@@ -785,14 +792,15 @@ struct ContentView: View {
                             .opacity(0.7)
                         }
                         .overlay(alignment: .topLeading) {
-                            // Label showing what the image is currently displaying
+                            // Label showing what the image is currently displaying (below control buttons)
                             Text(imageDisplayLabel)
                                 .font(.system(size: 9).bold())
                                 .foregroundStyle(.white)
                                 .padding(.horizontal, 6)
                                 .padding(.vertical, 3)
                                 .background(.black.opacity(0.5), in: Capsule())
-                                .padding(6)
+                                .padding(.leading, 6)
+                                .padding(.top, 38)
                         }
                         .overlay(alignment: .bottomTrailing) {
                             if zoomScale > 1.05 || gestureZoom != 1.0 {
@@ -910,9 +918,21 @@ struct ContentView: View {
                     .font(.caption.monospacedDigit())
                     .foregroundStyle(.secondary)
                 Spacer()
-                Text("\(String(format: "%.1f", settings.playbackSpeed))x")
-                    .font(.caption.monospacedDigit())
-                    .foregroundStyle(.secondary)
+                Button {
+                    // Cycle: 1x → 2x → 4x → 0.5x → 1x
+                    switch settings.playbackSpeed {
+                    case ..<1.5: settings.playbackSpeed = 2.0
+                    case ..<3.0: settings.playbackSpeed = 4.0
+                    case ..<5.0: settings.playbackSpeed = 0.5
+                    default: settings.playbackSpeed = 1.0
+                    }
+                    // Restart timer at new speed if playing
+                    if isPlaying { startPlayback() }
+                } label: {
+                    Text("\(String(format: settings.playbackSpeed == 0.5 ? "%.1f" : "%.0f", settings.playbackSpeed))x")
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                }
             }
             if settings.showSCLBoundaries {
                 compactSCLKey
@@ -922,7 +942,17 @@ struct ContentView: View {
 
     // MARK: - NDVI Time Series Chart
 
-    private var viLabel: String { chartShowsFveg ? "fVeg" : settings.vegetationIndex.rawValue }
+    private var viLabel: String {
+        if let target = chartFractionTarget {
+            switch target {
+            case .fveg: return "fVeg"
+            case .fnpv: return "fNPV"
+            case .fsoil: return "fSoil"
+            default: return target.rawValue
+            }
+        }
+        return settings.vegetationIndex.rawValue
+    }
 
     /// Hash of settings that affect per-pixel phenology fit.
     /// When this changes after a fit, results are stale and need re-running.
@@ -971,7 +1001,7 @@ struct ContentView: View {
             let label = "Pixel (\(inspectedPixelCol), \(inspectedPixelRow))"
             return w > 1 ? "\(label) [\(w)\u{00D7}\(w)]" : label
         }
-        if chartShowsFveg { return "Median fVeg" }
+        if let target = chartFractionTarget { return "Median \(target.rawValue)" }
         switch settings.displayMode {
         case .ndvi, .fcc, .rcc, .scl: return "Median \(viLabel)"
         case .bandRed: return "Red (B04)"
@@ -981,10 +1011,20 @@ struct ContentView: View {
         }
     }
 
-    /// Whether the chart should display fVeg values (when VI is FVC and unmix results exist).
-    private var chartShowsFveg: Bool {
-        settings.vegetationIndex == .fvc && !frameUnmixResults.isEmpty
+    /// Which fraction the chart is targeting (nil = VI or band reflectance).
+    /// Follows: Live menu fraction selection > vegetationIndex=FVC > nil.
+    private var chartFractionTarget: PhenologyParameter? {
+        if let param = phenologyDisplayParam, param.isFraction, param != .unmixRMSE, !frameUnmixResults.isEmpty {
+            return param
+        }
+        if settings.vegetationIndex == .fvc && !frameUnmixResults.isEmpty {
+            return .fveg
+        }
+        return nil
     }
+
+    /// Whether the chart should display fVeg values (when VI is FVC and unmix results exist).
+    private var chartShowsFveg: Bool { chartFractionTarget != nil }
 
     /// Dynamic y-axis domain based on what's being charted.
     private var chartYDomain: ClosedRange<Double> {
@@ -1008,7 +1048,7 @@ struct ContentView: View {
 
     /// Get the chart y-value for a frame depending on display mode.
     private func chartValue(for frame: NDVIFrame) -> Double {
-        if chartShowsFveg, let fv = medianFraction(for: frame, param: .fveg) {
+        if let target = chartFractionTarget, let fv = medianFraction(for: frame, param: target) {
             return fv
         }
         switch settings.displayMode {
@@ -1488,7 +1528,7 @@ struct ContentView: View {
                           dnOffset: f.dnOffset, width: f.width, height: f.height,
                           validMask: mask)
             }
-            let results = await Task.detached { () -> [UUID: FrameUnmixResult] in
+            let results = await Task.detached(priority: .utility) { () -> [UUID: FrameUnmixResult] in
                 var results = [UUID: FrameUnmixResult]()
                 let total = Double(frameData.count)
                 for (i, fd) in frameData.enumerated() {
@@ -1804,12 +1844,12 @@ struct ContentView: View {
                 )
                 .foregroundStyle(by: .value("Series", pt.series))
                 .lineStyle(StrokeStyle(
-                    lineWidth: pt.series == "Current" ? 2.5 : (isEndmember(pt.series) || pt.series == "Predicted" ? 2.0 : 1.5),
-                    dash: pt.series == "Current" ? [] : (isEndmember(pt.series) ? [3, 1] : [4, 2])))
+                    lineWidth: pt.series == "Current" ? 2.5 : (isEndmember(pt.series) ? 2.0 : (pt.series == "Predicted" ? 1.2 : 1.5)),
+                    dash: pt.series == "Current" ? [] : (isEndmember(pt.series) ? [3, 1] : (pt.series == "Predicted" ? [3, 2] : [4, 2]))))
                 .interpolationMethod(.catmullRom)
             }
-            // Point marks (only for non-endmember series)
-            ForEach(pts.filter { !isEndmember($0.series) }) { pt in
+            // Point marks (only for actual data series, not model curves)
+            ForEach(pts.filter { !isEndmember($0.series) && $0.series != "Predicted" }) { pt in
                 PointMark(
                     x: .value("Wavelength (nm)", pt.nm),
                     y: .value("Reflectance", pt.refl)
@@ -2169,14 +2209,21 @@ struct ContentView: View {
     /// Average value over the NxN inspect window for a single frame, matching current display mode.
     private func pixelValue(row: Int, col: Int, frame: NDVIFrame) -> Double? {
         let half = (settings.pixelInspectWindow - 1) / 2
-        // For FVC mode, read from unmix results
-        if chartShowsFveg, let ur = frameUnmixResults[frame.id] {
+        // For fraction modes, read from unmix results
+        if let target = chartFractionTarget, let ur = frameUnmixResults[frame.id] {
+            let fracMap: [[Float]]
+            switch target {
+            case .fveg: fracMap = ur.fveg
+            case .fnpv: fracMap = ur.fnpv
+            case .fsoil: fracMap = ur.fsoil
+            default: fracMap = ur.fveg
+            }
             var values = [Float]()
             for dr in -half...half {
                 for dc in -half...half {
                     let r = row + dr, c = col + dc
                     guard r >= 0, r < ur.height, c >= 0, c < ur.width else { continue }
-                    let v = ur.fveg[r][c]
+                    let v = fracMap[r][c]
                     if !v.isNaN { values.append(v) }
                 }
             }
@@ -2565,10 +2612,11 @@ struct ContentView: View {
 
     private func runDLFit() {
         let refYr = referenceYear
-        let useFveg = settings.vegetationIndex == .fvc && !frameUnmixResults.isEmpty
+        let fracTarget = chartFractionTarget
+        let useFraction = fracTarget != nil
         let data = processor.frames.filter { $0.validPixelCount > 0 }.compactMap { f -> DoubleLogistic.DataPoint? in
             let val: Double
-            if useFveg, let fv = medianFraction(for: f, param: .fveg) {
+            if let target = fracTarget, let fv = medianFraction(for: f, param: target) {
                 val = fv
             } else {
                 val = Double(f.medianNDVI)
@@ -2584,28 +2632,33 @@ struct ContentView: View {
             [settings.boundMnMin, settings.boundDeltaMin, settings.boundSosMin, settings.boundRspMin, max(minSL, 10), settings.boundRauMin],
             [settings.boundMnMax, settings.boundDeltaMax, settings.boundSosMax, settings.boundRspMax, min(maxSL, 350), settings.boundRauMax]
         )
+        // Fraction mode: mn=0, mx=1 fixed — for all fraction targets (0→1 normalised)
+        let fracMode = useFraction
+        let targetLabel = fracTarget?.rawValue ?? "VI"
 
-        // Log the initial guess and perturbation ranges
         let filtered = DoubleLogistic.filterCycleContamination(data: data)
         let guess = DoubleLogistic.initialGuess(data: filtered)
-        logDistributions(label: "Median DL fit", base: guess, p: p, sp: sp, nRuns: 50, minSL: minSL, maxSL: maxSL)
+        logDistributions(label: "Median DL fit (\(targetLabel))", base: guess, p: p, sp: sp, nRuns: 50, minSL: minSL, maxSL: maxSL)
+        if fracMode {
+            log.info("  Fraction mode: mn=0, mx=1 fixed (4-param fit)")
+        }
 
-        Task.detached {
-            // Stage 1: initial robust fit on all data
+        Task.detached(priority: .utility) {
             let initial = DoubleLogistic.ensembleFit(data: data,
                 perturbation: p, slopePerturbation: sp,
                 minSeasonLength: minSL, maxSeasonLength: maxSL,
                 slopeSymmetry: Double(settings.slopeSymmetry),
                 bounds: dlBounds,
-                secondPass: settings.enableSecondPass)
+                secondPass: settings.enableSecondPass,
+                fractionMode: fracMode)
 
-            // Stage 2: identify outlier dates using MAD of residuals
+            // Identify outlier dates using MAD of residuals
             let residuals = data.map { pt in
                 pt.ndvi - initial.best.evaluate(t: pt.doy)
             }
             let sortedAbs = residuals.map { abs($0) }.sorted()
-            let mad = sortedAbs[sortedAbs.count / 2]  // median absolute deviation
-            let threshold = max(0.05, mad * 4.0)  // 4 MADs, floor at 0.05
+            let mad = sortedAbs[sortedAbs.count / 2]
+            let threshold = max(useFraction ? 0.03 : 0.05, mad * 4.0)
 
             var outlierIndices = Set<Int>()
             for (i, r) in residuals.enumerated() {
@@ -2615,7 +2668,6 @@ struct ContentView: View {
             }
 
             if !outlierIndices.isEmpty {
-                // Exclude outliers from fit but DO NOT remove frames from processor
                 let cleanData = data.enumerated().filter { !outlierIndices.contains($0.offset) }.map(\.element)
 
                 await MainActor.run {
@@ -2624,7 +2676,7 @@ struct ContentView: View {
                         let src = frame.sourceID?.rawValue.uppercased() ?? "?"
                         return "\(frame.dateString) [\(src)] (residual=\(String(format: "%.3f", residuals[idx])))"
                     }
-                    log.warn("Excluded \(outlierIndices.count) outlier date(s) from fit (MAD=\(String(format: "%.3f", mad)), threshold=\(String(format: "%.3f", threshold))):")
+                    log.warn("Excluded \(outlierIndices.count) outlier date(s) from \(targetLabel) fit:")
                     for d in outlierDates { log.warn("  \(d)") }
                 }
 
@@ -2638,22 +2690,22 @@ struct ContentView: View {
                     return
                 }
 
-                // Stage 3: refit with clean data
                 let result = DoubleLogistic.ensembleFit(data: cleanData,
                     perturbation: p, slopePerturbation: sp,
                     minSeasonLength: minSL, maxSeasonLength: maxSL,
                     slopeSymmetry: Double(settings.slopeSymmetry),
                     bounds: dlBounds,
-                    secondPass: settings.enableSecondPass)
+                    secondPass: settings.enableSecondPass,
+                    fractionMode: fracMode)
                 await MainActor.run {
                     dlBest = result.best
                     dlEnsemble = result.ensemble
                     dlSliders = result.best
                     let rmseStr = String(format: "%.4f", result.best.rmse)
                     if result.best.rmse > 0.15 {
-                        log.warn("DL fit poor (excl. \(outlierIndices.count) outlier): RMSE=\(rmseStr) — try adjusting SOS slider or widening parameter bounds")
+                        log.warn("DL fit to \(targetLabel) poor (excl. \(outlierIndices.count) outlier): RMSE=\(rmseStr)")
                     } else {
-                        log.success("DL fit (excl. \(outlierIndices.count) outlier): RMSE=\(rmseStr), \(result.ensemble.count) viable of 50")
+                        log.success("DL fit to \(targetLabel) (excl. \(outlierIndices.count) outlier): RMSE=\(rmseStr)\(fracMode ? " [4-param]" : "")")
                     }
                 }
             } else {
@@ -2663,9 +2715,9 @@ struct ContentView: View {
                     dlSliders = initial.best
                     let rmseStr = String(format: "%.4f", initial.best.rmse)
                     if initial.best.rmse > 0.15 {
-                        log.warn("DL fit poor: RMSE=\(rmseStr) — try adjusting SOS slider or widening parameter bounds")
+                        log.warn("DL fit to \(targetLabel) poor: RMSE=\(rmseStr)")
                     } else {
-                        log.success("DL fit: RMSE=\(rmseStr), \(initial.ensemble.count) viable of 50, no outliers")
+                        log.success("DL fit to \(targetLabel): RMSE=\(rmseStr)\(fracMode ? " [4-param]" : ""), \(initial.ensemble.count) viable of 50")
                     }
                 }
             }
@@ -2713,7 +2765,7 @@ struct ContentView: View {
 
         let enforceAOI = settings.enforceAOI
         let coverageThreshold = settings.pixelCoverageThreshold
-        pixelFitTask = Task.detached {
+        pixelFitTask = Task.detached(priority: .utility) {
             let result = await PixelPhenologyFitter.fitAllPixels(
                 frames: frames,
                 medianParams: medianFit,
@@ -2783,7 +2835,7 @@ struct ContentView: View {
             [settings.boundMnMin, settings.boundDeltaMin, settings.boundSosMin, settings.boundRspMin, max(minSL, 10), settings.boundRauMin],
             [settings.boundMnMax, settings.boundDeltaMax, settings.boundSosMax, settings.boundRspMax, min(maxSL, 350), settings.boundRauMax]
         )
-        Task.detached {
+        Task.detached(priority: .utility) {
             let result = DoubleLogistic.ensembleFit(data: data,
                 perturbation: p, slopePerturbation: sp,
                 minSeasonLength: minSL, maxSeasonLength: maxSL,
@@ -2819,7 +2871,7 @@ struct ContentView: View {
             [settings.boundMnMin, settings.boundDeltaMin, settings.boundSosMin, settings.boundRspMin, max(minSL, 10), settings.boundRauMin],
             [settings.boundMnMax, settings.boundDeltaMax, settings.boundSosMax, settings.boundRspMax, min(maxSL, 350), settings.boundRauMax]
         )
-        Task.detached {
+        Task.detached(priority: .utility) {
             let result = DoubleLogistic.ensembleFit(data: data,
                 perturbation: p, slopePerturbation: sp,
                 minSeasonLength: minSL, maxSeasonLength: maxSL,
@@ -2848,7 +2900,7 @@ struct ContentView: View {
             [settings.boundMnMin, settings.boundDeltaMin, settings.boundSosMin, settings.boundRspMin, max(minSL, 10), settings.boundRauMin],
             [settings.boundMnMax, settings.boundDeltaMax, settings.boundSosMax, settings.boundRspMax, min(maxSL, 350), settings.boundRauMax]
         )
-        Task.detached {
+        Task.detached(priority: .utility) {
             let fitted = DoubleLogistic.fit(data: data, initial: start,
                                            minSeasonLength: minSL, maxSeasonLength: maxSL,
                 slopeSymmetry: Double(settings.slopeSymmetry),
@@ -3459,6 +3511,7 @@ struct LogView: View {
 
     private var logList: some View {
         LogTextView(entries: log.entries, searchTrigger: searchTrigger)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
 

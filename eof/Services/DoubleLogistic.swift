@@ -153,6 +153,72 @@ enum DoubleLogistic {
         return sum / wSum
     }
 
+    /// Generic Nelder-Mead simplex optimizer.
+    /// Returns the parameter vector that minimizes `cost`.
+    private static func nelderMead(
+        x0: [Double],
+        scales: [Double],
+        cost: ([Double]) -> Double,
+        maxIter: Int = 2000
+    ) -> [Double] {
+        let n = x0.count
+        var simplex = [[Double]]()
+        simplex.append(x0)
+        for i in 0..<n {
+            var pt = x0
+            pt[i] += scales[i]
+            simplex.append(pt)
+        }
+        var fvals = simplex.map { cost($0) }
+
+        let alpha = 1.0, gamma = 2.0, rho = 0.5, sigma = 0.5
+        let tol = 1e-8
+
+        for _ in 0..<maxIter {
+            let indices = (0...n).sorted { fvals[$0] < fvals[$1] }
+            simplex = indices.map { simplex[$0] }
+            fvals = indices.map { fvals[$0] }
+            if fvals[n] - fvals[0] < tol { break }
+
+            var centroid = [Double](repeating: 0, count: n)
+            for i in 0..<n {
+                for j in 0..<n { centroid[j] += simplex[i][j] }
+            }
+            for j in 0..<n { centroid[j] /= Double(n) }
+
+            let worst = simplex[n]
+            var reflected = [Double](repeating: 0, count: n)
+            for j in 0..<n { reflected[j] = centroid[j] + alpha * (centroid[j] - worst[j]) }
+            let fr = cost(reflected)
+
+            if fr < fvals[0] {
+                var expanded = [Double](repeating: 0, count: n)
+                for j in 0..<n { expanded[j] = centroid[j] + gamma * (reflected[j] - centroid[j]) }
+                let fe = cost(expanded)
+                if fe < fr { simplex[n] = expanded; fvals[n] = fe }
+                else { simplex[n] = reflected; fvals[n] = fr }
+            } else if fr < fvals[n - 1] {
+                simplex[n] = reflected; fvals[n] = fr
+            } else {
+                var contracted = [Double](repeating: 0, count: n)
+                let best = fr < fvals[n] ? reflected : worst
+                let fb = fr < fvals[n] ? fr : fvals[n]
+                for j in 0..<n { contracted[j] = centroid[j] + rho * (best[j] - centroid[j]) }
+                let fc = cost(contracted)
+                if fc < fb { simplex[n] = contracted; fvals[n] = fc }
+                else {
+                    for i in 1...n {
+                        for j in 0..<n {
+                            simplex[i][j] = simplex[0][j] + sigma * (simplex[i][j] - simplex[0][j])
+                        }
+                        fvals[i] = cost(simplex[i])
+                    }
+                }
+            }
+        }
+        return simplex[0]
+    }
+
     /// Fit using Nelder-Mead simplex optimization with Huber loss.
     /// The optimizer minimizes Huber loss (robust to outliers). RMSE is computed
     /// after convergence for quality reporting.
@@ -168,106 +234,79 @@ enum DoubleLogistic {
         bounds: (lo: [Double], hi: [Double])? = nil,
         weights: [Double]? = nil
     ) -> DLParams {
-        let n = 6  // number of parameters
-        let x0 = initial.asOptArray  // [mn, delta, sos, rsp, seasonLength, rau]
-
-        // Bounds in reparameterized space
         let lo = bounds?.lo ?? [-0.5, 0.05, 1.0, 0.02, max(minSeasonLength, 10), 0.02]
         let hi = bounds?.hi ?? [0.8, 1.5, 365.0, 0.6, min(maxSeasonLength, 350), 0.6]
 
         func clamp(_ x: [Double]) -> [Double] {
             var c = x
-            for i in 0..<n {
-                c[i] = max(lo[i], min(hi[i], c[i]))
-            }
-            // Slope symmetry: constrain rau (index 5) relative to rsp (index 3)
+            for i in 0..<6 { c[i] = max(lo[i], min(hi[i], c[i])) }
             if slopeSymmetry > 0 {
                 let frac = slopeSymmetry / 100.0
                 let rsp = c[3]
                 c[5] = max(rsp * (1 - frac), min(rsp * (1 + frac), c[5]))
-                c[5] = max(lo[5], min(hi[5], c[5]))  // re-enforce absolute bounds
+                c[5] = max(lo[5], min(hi[5], c[5]))
             }
             return c
         }
 
-        func cost(_ x: [Double]) -> Double {
-            let p = DLParams.fromOpt(clamp(x))
-            return huberLoss(params: p, data: data, weights: weights)
-        }
+        let bestX = nelderMead(
+            x0: initial.asOptArray,
+            scales: [0.1, 0.1, 20.0, 0.02, 20.0, 0.02],
+            cost: { x in huberLoss(params: DLParams.fromOpt(clamp(x)), data: data, weights: weights) },
+            maxIter: maxIter
+        )
 
-        // Initialize simplex
-        var simplex = [[Double]]()
-        simplex.append(x0)
-        let scales = [0.1, 0.1, 20.0, 0.02, 20.0, 0.02]  // [mn, delta, sos, rsp, seasonLen, rau]
-        for i in 0..<n {
-            var pt = x0
-            pt[i] += scales[i]
-            simplex.append(pt)
-        }
-        var fvals = simplex.map { cost($0) }
-
-        let alpha = 1.0, gamma = 2.0, rho = 0.5, sigma = 0.5
-        let tol = 1e-8
-
-        for _ in 0..<maxIter {
-            // Sort
-            let indices = (0...n).sorted { fvals[$0] < fvals[$1] }
-            simplex = indices.map { simplex[$0] }
-            fvals = indices.map { fvals[$0] }
-
-            // Check convergence
-            if fvals[n] - fvals[0] < tol { break }
-
-            // Centroid (excluding worst)
-            var centroid = [Double](repeating: 0, count: n)
-            for i in 0..<n {
-                for j in 0..<n { centroid[j] += simplex[i][j] }
-            }
-            for j in 0..<n { centroid[j] /= Double(n) }
-
-            // Reflect
-            let worst = simplex[n]
-            var reflected = [Double](repeating: 0, count: n)
-            for j in 0..<n { reflected[j] = centroid[j] + alpha * (centroid[j] - worst[j]) }
-            let fr = cost(reflected)
-
-            if fr < fvals[0] {
-                // Expand
-                var expanded = [Double](repeating: 0, count: n)
-                for j in 0..<n { expanded[j] = centroid[j] + gamma * (reflected[j] - centroid[j]) }
-                let fe = cost(expanded)
-                if fe < fr {
-                    simplex[n] = expanded; fvals[n] = fe
-                } else {
-                    simplex[n] = reflected; fvals[n] = fr
-                }
-            } else if fr < fvals[n - 1] {
-                simplex[n] = reflected; fvals[n] = fr
-            } else {
-                // Contract
-                var contracted = [Double](repeating: 0, count: n)
-                let best = fr < fvals[n] ? reflected : worst
-                let fb = fr < fvals[n] ? fr : fvals[n]
-                for j in 0..<n { contracted[j] = centroid[j] + rho * (best[j] - centroid[j]) }
-                let fc = cost(contracted)
-                if fc < fb {
-                    simplex[n] = contracted; fvals[n] = fc
-                } else {
-                    // Shrink
-                    for i in 1...n {
-                        for j in 0..<n {
-                            simplex[i][j] = simplex[0][j] + sigma * (simplex[i][j] - simplex[0][j])
-                        }
-                        fvals[i] = cost(simplex[i])
-                    }
-                }
-            }
-        }
-
-        var best = DLParams.fromOpt(clamp(simplex[0]))
-        // Enforce mx > mn post-optimization
+        var best = DLParams.fromOpt(clamp(bestX))
         if best.mx <= best.mn { best.mx = best.mn + 0.05 }
-        best.rmse = rmse(params: best, data: data)  // true RMSE for quality reporting
+        best.rmse = rmse(params: best, data: data)
+        return best
+    }
+
+    /// Fraction-mode fit: mn=0 and mx=1 are fixed, only optimizes [sos, rsp, seasonLength, rau].
+    /// ~30% faster than full 6-param fit due to smaller simplex.
+    static func fitFraction(
+        data: [DataPoint],
+        initial: DLParams,
+        maxIter: Int = 2000,
+        minSeasonLength: Double = 0,
+        maxSeasonLength: Double = 366,
+        slopeSymmetry: Double = 0,
+        bounds: (lo: [Double], hi: [Double])? = nil,
+        weights: [Double]? = nil
+    ) -> DLParams {
+        // Bounds for [sos, rsp, seasonLength, rau] — indices 2,3,4,5 of full bounds
+        let fullLo = bounds?.lo ?? [-0.5, 0.05, 1.0, 0.02, max(minSeasonLength, 10), 0.02]
+        let fullHi = bounds?.hi ?? [0.8, 1.5, 365.0, 0.6, min(maxSeasonLength, 350), 0.6]
+        let lo = [fullLo[2], fullLo[3], fullLo[4], fullLo[5]]
+        let hi = [fullHi[2], fullHi[3], fullHi[4], fullHi[5]]
+
+        func clamp(_ x: [Double]) -> [Double] {
+            var c = x
+            for i in 0..<4 { c[i] = max(lo[i], min(hi[i], c[i])) }
+            if slopeSymmetry > 0 {
+                let frac = slopeSymmetry / 100.0
+                let rsp = c[1]
+                c[3] = max(rsp * (1 - frac), min(rsp * (1 + frac), c[3]))
+                c[3] = max(lo[3], min(hi[3], c[3]))
+            }
+            return c
+        }
+
+        func toParams(_ x: [Double]) -> DLParams {
+            let cx = clamp(x)
+            return DLParams(mn: 0, mx: 1, sos: cx[0], rsp: cx[1], eos: cx[0] + cx[2], rau: cx[3])
+        }
+
+        let x0 = [initial.sos, initial.rsp, initial.eos - initial.sos, initial.rau]
+        let bestX = nelderMead(
+            x0: x0,
+            scales: [20.0, 0.02, 20.0, 0.02],
+            cost: { x in huberLoss(params: toParams(x), data: data, weights: weights) },
+            maxIter: maxIter
+        )
+
+        var best = toParams(bestX)
+        best.rmse = rmse(params: best, data: data)
         return best
     }
 
@@ -352,45 +391,52 @@ enum DoubleLogistic {
         maxSeasonLength: Double = 366,
         slopeSymmetry: Double = 0,
         bounds: (lo: [Double], hi: [Double])? = nil,
-        secondPass: Bool = false
+        secondPass: Bool = false,
+        fractionMode: Bool = false
     ) -> (best: DLParams, ensemble: [DLParams]) {
         let filtered = filterCycleContamination(data: data)
-        let guess = initialGuess(data: filtered)
+        let baseGuess = initialGuess(data: filtered)
+        // In fraction mode, fix mn=0, mx=1
+        let guess = fractionMode
+            ? DLParams(mn: 0, mx: 1, sos: baseGuess.sos, rsp: baseGuess.rsp, eos: baseGuess.eos, rau: baseGuess.rau)
+            : baseGuess
         var allFits = [DLParams]()
 
         let p = perturbation
         let sp = slopePerturbation
-        // Use provided bounds or defaults for clamping
         let blo = bounds?.lo ?? [-0.5, 0.05, 1.0, 0.02, max(minSeasonLength, 10), 0.02]
         let bhi = bounds?.hi ?? [0.8, 1.5, 365.0, 0.6, min(maxSeasonLength, 350), 0.6]
 
-        // Run from perturbed initial conditions
+        let fitter: (DLParams) -> DLParams = fractionMode
+            ? { initial in fitFraction(data: filtered, initial: initial,
+                    minSeasonLength: minSeasonLength, maxSeasonLength: maxSeasonLength,
+                    slopeSymmetry: slopeSymmetry, bounds: (blo, bhi)) }
+            : { initial in fit(data: filtered, initial: initial,
+                    minSeasonLength: minSeasonLength, maxSeasonLength: maxSeasonLength,
+                    slopeSymmetry: slopeSymmetry, bounds: (blo, bhi)) }
+
         for i in 0..<nRuns {
             var perturbed = guess
             if i > 0 {
-                // Multiplicative uniform perturbation: param * (1 + U(-p, p))
-                perturbed.mn  += guess.mn  * Double.random(in: -p...p)
-                perturbed.mx  += guess.mx  * Double.random(in: -p...p)
+                if !fractionMode {
+                    perturbed.mn  += guess.mn  * Double.random(in: -p...p)
+                    perturbed.mx  += guess.mx  * Double.random(in: -p...p)
+                }
                 perturbed.sos += guess.sos * Double.random(in: -p...p)
                 perturbed.rsp += guess.rsp * Double.random(in: -sp...sp)
                 perturbed.eos += guess.eos * Double.random(in: -p...p)
                 perturbed.rau += guess.rau * Double.random(in: -sp...sp)
-                // Clamp to physical bounds from settings
-                perturbed.mn = max(blo[0], min(bhi[0], perturbed.mn))
-                perturbed.mx = max(perturbed.mn + blo[1], min(perturbed.mn + bhi[1], perturbed.mx))
+                if !fractionMode {
+                    perturbed.mn = max(blo[0], min(bhi[0], perturbed.mn))
+                    perturbed.mx = max(perturbed.mn + blo[1], min(perturbed.mn + bhi[1], perturbed.mx))
+                    if perturbed.mx <= perturbed.mn { perturbed.mx = perturbed.mn + 0.1 }
+                }
                 perturbed.sos = max(blo[2], min(bhi[2], perturbed.sos))
                 perturbed.rsp = max(blo[3], min(bhi[3], perturbed.rsp))
                 perturbed.eos = max(perturbed.sos + minSeasonLength, min(perturbed.sos + maxSeasonLength, perturbed.eos))
                 perturbed.rau = max(blo[5], min(bhi[5], perturbed.rau))
-                // Enforce mx > mn
-                if perturbed.mx <= perturbed.mn {
-                    perturbed.mx = perturbed.mn + 0.1
-                }
             }
-            let fitted = fit(data: filtered, initial: perturbed,
-                           minSeasonLength: minSeasonLength, maxSeasonLength: maxSeasonLength,
-                           slopeSymmetry: slopeSymmetry, bounds: (blo, bhi))
-            allFits.append(fitted)
+            allFits.append(fitter(perturbed))
         }
 
         allFits.sort { $0.rmse < $1.rmse }
@@ -399,15 +445,17 @@ enum DoubleLogistic {
         // Second pass: refit with DL-derived weights
         if secondPass {
             let w = secondPassWeights(data: filtered, firstPass: best)
-            best = fit(data: filtered, initial: best,
-                      minSeasonLength: minSeasonLength, maxSeasonLength: maxSeasonLength,
-                      slopeSymmetry: slopeSymmetry, bounds: (blo, bhi), weights: w)
+            best = fractionMode
+                ? fitFraction(data: filtered, initial: best,
+                    minSeasonLength: minSeasonLength, maxSeasonLength: maxSeasonLength,
+                    slopeSymmetry: slopeSymmetry, bounds: (blo, bhi), weights: w)
+                : fit(data: filtered, initial: best,
+                    minSeasonLength: minSeasonLength, maxSeasonLength: maxSeasonLength,
+                    slopeSymmetry: slopeSymmetry, bounds: (blo, bhi), weights: w)
         }
 
-        // Keep solutions within 1.5x best RMSE as "viable"
         let threshold = best.rmse * 1.5
         let viable = allFits.filter { $0.rmse <= threshold }
-
         return (best: best, ensemble: viable)
     }
 
