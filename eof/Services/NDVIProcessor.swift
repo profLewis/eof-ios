@@ -16,6 +16,7 @@ class NDVIProcessor {
     var isPaused = false
     var compareSourcesMode = false
     var comparisonPairs: [SourceComparisonView.ComparisonPair] = []
+    var cachedFrames: [NDVIFrame] = []
 
     private var lastGeometryCentroid: (lon: Double, lat: Double)?
     private var fetchTask: Task<Void, Never>?
@@ -36,6 +37,7 @@ class NDVIProcessor {
         status = .searching
         progress = 0
         progressMessage = "Searching STAC catalog..."
+        if !frames.isEmpty { cachedFrames = frames }
         frames = []
         errorMessage = nil
         sourceProgresses = []
@@ -235,6 +237,7 @@ class NDVIProcessor {
             let capturedCloudMask = settings.cloudMask
             let capturedSCLValidClasses = settings.sclValidClasses
             let capturedVegetationIndex = settings.vegetationIndex
+            let capturedCoverageThreshold = settings.pixelCoverageThreshold
             var processedCount = 0
             var newFrames = [NDVIFrame]()
             let maxConc = settings.maxConcurrent
@@ -459,7 +462,8 @@ class NDVIProcessor {
                                         displayMode: capturedDisplayMode,
                                         cloudMask: capturedCloudMask,
                                         sclValidClasses: capturedSCLValidClasses,
-                                        vegetationIndex: capturedVegetationIndex
+                                        vegetationIndex: capturedVegetationIndex,
+                                        pixelCoverageThreshold: capturedCoverageThreshold
                                     )
                                 }
                                 return .success(frame, slot, cfg.sourceID, CFAbsoluteTimeGetCurrent() - t0, dateKey)
@@ -541,7 +545,8 @@ class NDVIProcessor {
                                             displayMode: capturedDisplayMode,
                                             cloudMask: capturedCloudMask,
                                             sclValidClasses: capturedSCLValidClasses,
-                                            vegetationIndex: capturedVegetationIndex
+                                            vegetationIndex: capturedVegetationIndex,
+                                            pixelCoverageThreshold: capturedCoverageThreshold
                                         )
                                     }
                                     return .success(frame, slot, cfg.sourceID, CFAbsoluteTimeGetCurrent() - t0, raceDateKey)
@@ -622,7 +627,8 @@ class NDVIProcessor {
                                     displayMode: capturedDisplayMode,
                                     cloudMask: capturedCloudMask,
                                     sclValidClasses: capturedSCLValidClasses,
-                                    vegetationIndex: capturedVegetationIndex
+                                    vegetationIndex: capturedVegetationIndex,
+                                    pixelCoverageThreshold: capturedCoverageThreshold
                                 )
                             }
                             return .success(frame, slot, cfg.sourceID, CFAbsoluteTimeGetCurrent() - t0, retryDateKey)
@@ -654,8 +660,14 @@ class NDVIProcessor {
                 sp.status = isCancelled ? .failed : .done
             }
 
-            // Sort by date — keep whatever frames we have (even if cancelled)
-            frames = newFrames.sorted { $0.date < $1.date }
+            // Sort by date, drop frames with no valid pixels
+            let beforeCount = newFrames.count
+            let validFrames = newFrames.filter { $0.validPixelCount > 0 }
+            let droppedEmpty = beforeCount - validFrames.count
+            frames = validFrames.sorted { $0.date < $1.date }
+            if droppedEmpty > 0 {
+                log.info("Dropped \(droppedEmpty) frames with no valid pixels")
+            }
             lastGeometryCentroid = (lon: centroid.lon, lat: centroid.lat)
 
             // Assemble comparison pairs — all pairwise source combinations per date
@@ -711,6 +723,7 @@ class NDVIProcessor {
                 progressMessage = "Done! \(frames.count) scenes loaded"
                 status = .done
 
+                cachedFrames = []  // successful fetch — no need to revert
                 log.success("Pipeline complete: \(frames.count) frames from \(totalItems) scenes")
                 if skipped > 0 {
                     log.info("Dropped \(skipped) scenes (cloud/no valid data/error)")
@@ -835,6 +848,7 @@ class NDVIProcessor {
         let capturedCloudMask = settings.cloudMask
         let capturedSCLValidClasses = settings.sclValidClasses
         let capturedVegetationIndex = settings.vegetationIndex
+        let capturedCoverageThreshold2 = settings.pixelCoverageThreshold
 
         var allNewItems = [STACItem]()
         for range in fetchRanges {
@@ -907,7 +921,8 @@ class NDVIProcessor {
                         displayMode: capturedDisplayMode,
                         cloudMask: capturedCloudMask,
                         sclValidClasses: capturedSCLValidClasses,
-                        vegetationIndex: capturedVegetationIndex
+                        vegetationIndex: capturedVegetationIndex,
+                        pixelCoverageThreshold: capturedCoverageThreshold2
                     )
                 }
                 running += 1
@@ -938,6 +953,17 @@ class NDVIProcessor {
         isCancelled = true
         isPaused = false
         log.info("Stopping fetch...")
+    }
+
+    /// Revert to cached frames from previous fetch.
+    @MainActor
+    func revertToCached() {
+        guard !cachedFrames.isEmpty else { return }
+        frames = cachedFrames
+        cachedFrames = []
+        status = .done
+        progressMessage = "Reverted — \(frames.count) scenes"
+        log.info("Reverted to \(frames.count) cached frames")
     }
 
     /// Pause an in-progress fetch — running tasks finish but no new ones start.
@@ -977,7 +1003,8 @@ class NDVIProcessor {
         displayMode: AppSettings.DisplayMode = .fcc,
         cloudMask: Bool = true,
         sclValidClasses: Set<Int> = [4, 5],
-        vegetationIndex: AppSettings.VegetationIndex = .ndvi
+        vegetationIndex: AppSettings.VegetationIndex = .ndvi,
+        pixelCoverageThreshold: Double = 0.01
     ) async throws -> NDVIFrame? {
         let dateStr = item.dateString
         let srcName = sourceID?.rawValue.uppercased() ?? "?"
@@ -1111,8 +1138,9 @@ class NDVIProcessor {
                 }
             }
             if redAllZero || nirAllZero {
-                log.error("\(dateStr) [\(srcName)]: \(redAllZero ? "RED" : "") \(nirAllZero ? "NIR" : "") band all zeros — corrupt/nodata — SKIPPED")
-                return nil
+                let emptyBands = [redAllZero ? "RED" : nil, nirAllZero ? "NIR" : nil].compactMap { $0 }.joined(separator: "+")
+                log.error("\(dateStr) [\(srcName)]: \(emptyBands) band ALL ZEROS across entire image — download failure or nodata tile — will retry from alternate source")
+                throw COGError.bandDataEmpty("\(emptyBands) all zeros")
             }
 
             // Download extra bands: always in comparison mode, otherwise only if display mode needs them
@@ -1205,44 +1233,45 @@ class NDVIProcessor {
             }
 
             // Compute VI — only SCL mask applied (no DN/reflectance filtering)
-            // DN offset by source: AWS always pre-applies the BOA offset → 0.
-            // PC/CDSE serve raw ESA DNs where PB >= 04.00 has +1000 → -1000.
-            let dnOffset: Float
-            if sourceID == .aws {
-                dnOffset = 0  // AWS earth-search always applies BOA offset
-            } else {
-                dnOffset = item.dnOffset
-            }
-            if dnOffset != 0 {
-                log.info("\(dateStr) [\(srcName)]: applying DN offset \(Int(dnOffset)) (PB=\(item.properties.processingBaseline ?? "?"))")
-            }
+            // DN offset determination — source-specific + auto-validation
+            let dnOffset: Float = Self.determineDNOffset(
+                red: red, nir: nir, sclMask: sclMask, cloudMask: cloudMask,
+                polyPixels: polyPixels, width: width, height: height,
+                item: item, sourceID: sourceID, log: log,
+                dateStr: dateStr, srcName: srcName
+            )
             let viMode = vegetationIndex
             var ndvi = [[Float]](repeating: [Float](repeating: .nan, count: width), count: height)
             var validCount = 0
             var validValues = [Float]()
             var polyPixelCount = 0
-            // DN diagnostics
+            // DN diagnostics + rejection counters
             var redDNMin: UInt16 = .max, redDNMax: UInt16 = 0
             var nirDNMin: UInt16 = .max, nirDNMax: UInt16 = 0
             var zeroDNCount = 0
+            var sclMaskedCount = 0
+            var saturatedCount = 0
+            var negReflCount = 0
+            var zeroSumCount = 0
             for row in 0..<height {
                 for col in 0..<width {
-                    // Check polygon containment
-                    guard Self.pointInPolygon(
-                        x: Double(col) + 0.5, y: Double(row) + 0.5,
-                        polygon: polyPixels
+                    // Check polygon containment (with fractional coverage for boundary pixels)
+                    guard Self.pixelInAOI(
+                        col: col, row: row,
+                        polygon: polyPixels,
+                        threshold: pixelCoverageThreshold
                     ) else { continue }
                     polyPixelCount += 1
 
                     // SCL mask is the ONLY mask applied
-                    if cloudMask, let mask = sclMask, mask[row][col] { continue }
+                    if cloudMask, let mask = sclMask, mask[row][col] { sclMaskedCount += 1; continue }
 
                     let rawRed = red[row][col]
                     let rawNir = nir[row][col]
 
                     // DN=0 is nodata, DN=65535 is saturated — skip both
                     if rawRed == 0 || rawNir == 0 { zeroDNCount += 1; continue }
-                    if rawRed == 65535 || rawNir == 65535 { continue }
+                    if rawRed == 65535 || rawNir == 65535 { saturatedCount += 1; continue }
 
                     redDNMin = min(redDNMin, rawRed); redDNMax = max(redDNMax, rawRed)
                     nirDNMin = min(nirDNMin, rawNir); nirDNMax = max(nirDNMax, rawNir)
@@ -1254,18 +1283,23 @@ class NDVIProcessor {
                     let redRefl = (redDN + dnOffset) / quantificationValue
                     let nirRefl = (nirDN + dnOffset) / quantificationValue
 
-                    // Skip if reflectance is non-physical (negative after offset, or > 1.5)
-                    if redRefl < 0 || nirRefl < 0 || redRefl > 1.5 || nirRefl > 1.5 { continue }
+                    // Skip if reflectance is clearly non-physical
+                    // Allow small negatives (atmospheric correction noise near offset threshold)
+                    if redRefl < -0.05 || nirRefl < -0.05 || redRefl > 1.5 || nirRefl > 1.5 { negReflCount += 1; continue }
+
+                    // Clamp small negatives to zero for VI computation
+                    let redR = max(Float(0), redRefl)
+                    let nirR = max(Float(0), nirRefl)
 
                     // Compute selected vegetation index
                     let val: Float
                     switch viMode {
                     case .ndvi:
-                        let sum = nirRefl + redRefl
-                        guard sum > 0 else { continue }
-                        val = (nirRefl - redRefl) / sum
+                        let sum = nirR + redR
+                        guard sum > 0 else { zeroSumCount += 1; continue }
+                        val = (nirR - redR) / sum
                     case .dvi:
-                        val = nirRefl - redRefl
+                        val = nirR - redR
                     }
                     ndvi[row][col] = val
                     validValues.append(val)
@@ -1274,27 +1308,136 @@ class NDVIProcessor {
             }
 
             // Log DN range for diagnostics
+            let sclPassCount = polyPixelCount - sclMaskedCount
             if polyPixelCount > 0 {
-                let unmasked = polyPixelCount - (cloudMask && sclMask != nil ? sclMask!.flatMap{$0}.filter{$0}.count : 0)
-                log.info("\(dateStr) [\(srcName)] ID=\(item.id): DN red=\(redDNMin)-\(redDNMax) nir=\(nirDNMin)-\(nirDNMax) zero=\(zeroDNCount)/\(unmasked)")
+                log.info("\(dateStr) [\(srcName)] ID=\(item.id): DN red=\(redDNMin)-\(redDNMax) nir=\(nirDNMin)-\(nirDNMax) zero=\(zeroDNCount)/\(sclPassCount)")
+            }
+            // Detailed rejection breakdown when no valid pixels
+            if validCount == 0 && polyPixelCount > 0 {
+                log.warn("\(dateStr) [\(srcName)] rejection: poly=\(polyPixelCount) sclMask=\(sclMaskedCount) DN0=\(zeroDNCount) sat=\(saturatedCount) negRefl=\(negReflCount) zeroSum=\(zeroSumCount) offset=\(Int(dnOffset))")
+            }
+
+            // ------------------------------------------------------------------
+            // Detect band download failure: SCL has valid pixels but bands are
+            // all zeros within the AOI polygon. This happens when:
+            //   (a) partial tile coverage — 10m bands have nodata where 20m SCL doesn't
+            //   (b) transient download failure — COG read returned zeros
+            //   (c) corrupt tile on the server
+            // Strategy: re-download RED+NIR once from same source. If still empty,
+            // throw so the dispatch loop retries from an alternate source.
+            // ------------------------------------------------------------------
+            var finalRed = red
+            var finalNir = nir
+            var finalNdvi = ndvi
+            var finalValidCount = validCount
+            var finalValidValues = validValues
+            var finalGreen = green
+            var finalBlue = blue
+
+            if validCount == 0 && sclPassCount > 0 && zeroDNCount > sclPassCount / 2 {
+                // More than half the SCL-valid pixels have DN=0 — likely a band download failure
+                log.warn("\(dateStr) [\(srcName)]: BAND DATA EMPTY — \(zeroDNCount)/\(sclPassCount) SCL-valid pixels have DN=0")
+                log.info("\(dateStr) [\(srcName)]: Attempting re-download of RED + NIR bands from same source...")
+
+                // Re-download red and NIR using a fresh COGReader
+                let retryCogReader = COGReader()
+                do {
+                    async let retryRedData = retryCogReader.readRegion(url: redURL, pixelBounds: pixelBounds, authHeaders: authHeaders, requestSigner: requestSigner)
+                    async let retryNirData = retryCogReader.readRegion(url: nirURL, pixelBounds: pixelBounds, authHeaders: authHeaders, requestSigner: requestSigner)
+                    let retryRed = try await retryRedData
+                    let retryNir = try await retryNirData
+
+                    // Check if re-downloaded data is also all zeros within polygon
+                    var retryZeroDN = 0
+                    var retryNonZeroDN = 0
+                    for row in 0..<height {
+                        for col in 0..<width {
+                            guard Self.pointInPolygon(x: Double(col) + 0.5, y: Double(row) + 0.5, polygon: polyPixels) else { continue }
+                            if cloudMask, let mask = sclMask, mask[row][col] { continue }
+                            let rr = retryRed[row][col]
+                            let rn = retryNir[row][col]
+                            if rr == 0 || rn == 0 { retryZeroDN += 1 } else { retryNonZeroDN += 1 }
+                        }
+                    }
+
+                    if retryNonZeroDN > 0 {
+                        // Re-download succeeded — recompute NDVI with new data
+                        log.success("\(dateStr) [\(srcName)]: Re-download SUCCESS — \(retryNonZeroDN) non-zero pixels (was \(zeroDNCount) zeros)")
+                        finalRed = retryRed
+                        finalNir = retryNir
+
+                        // Also re-download green/blue if they were requested
+                        if let gURL = greenURL {
+                            finalGreen = try? await retryCogReader.readRegion(url: gURL, pixelBounds: pixelBounds, authHeaders: authHeaders, requestSigner: requestSigner)
+                        }
+                        if let bURL = blueURL {
+                            finalBlue = try? await retryCogReader.readRegion(url: bURL, pixelBounds: pixelBounds, authHeaders: authHeaders, requestSigner: requestSigner)
+                        }
+
+                        // Recompute NDVI
+                        var retryNdvi = [[Float]](repeating: [Float](repeating: .nan, count: width), count: height)
+                        var retryValidCount = 0
+                        var retryValidValues = [Float]()
+                        for row in 0..<height {
+                            for col in 0..<width {
+                                guard Self.pointInPolygon(x: Double(col) + 0.5, y: Double(row) + 0.5, polygon: polyPixels) else { continue }
+                                if cloudMask, let mask = sclMask, mask[row][col] { continue }
+                                let rawRed2 = retryRed[row][col]
+                                let rawNir2 = retryNir[row][col]
+                                if rawRed2 == 0 || rawNir2 == 0 { continue }
+                                if rawRed2 == 65535 || rawNir2 == 65535 { continue }
+                                let redRefl2 = (Float(rawRed2) + dnOffset) / quantificationValue
+                                let nirRefl2 = (Float(rawNir2) + dnOffset) / quantificationValue
+                                if redRefl2 < -0.05 || nirRefl2 < -0.05 || redRefl2 > 1.5 || nirRefl2 > 1.5 { continue }
+                                let redR2 = max(Float(0), redRefl2)
+                                let nirR2 = max(Float(0), nirRefl2)
+                                let val2: Float
+                                switch viMode {
+                                case .ndvi:
+                                    let sum2 = nirR2 + redR2
+                                    guard sum2 > 0 else { continue }
+                                    val2 = (nirR2 - redR2) / sum2
+                                case .dvi:
+                                    val2 = nirR2 - redR2
+                                }
+                                retryNdvi[row][col] = val2
+                                retryValidValues.append(val2)
+                                retryValidCount += 1
+                            }
+                        }
+                        finalNdvi = retryNdvi
+                        finalValidCount = retryValidCount
+                        finalValidValues = retryValidValues
+                        log.info("\(dateStr) [\(srcName)]: Re-download NDVI: \(retryValidCount) valid pixels")
+                    } else {
+                        // Re-download still all zeros — persistent issue, throw to try alternate source
+                        log.error("\(dateStr) [\(srcName)]: Re-download STILL ALL ZEROS (\(retryZeroDN) zero-DN pixels) — tile has no data for this AOI")
+                        log.info("\(dateStr) [\(srcName)]: Will attempt alternate source if available")
+                        throw COGError.bandDataEmpty("re-download still zeros for \(dateStr)")
+                    }
+                } catch let cogErr as COGError {
+                    throw cogErr  // propagate (including bandDataEmpty)
+                } catch {
+                    log.error("\(dateStr) [\(srcName)]: Re-download FAILED — \(error.localizedDescription)")
+                    log.info("\(dateStr) [\(srcName)]: Will attempt alternate source if available")
+                    throw COGError.bandDataEmpty("re-download failed: \(error.localizedDescription)")
+                }
             }
 
             let medianNDVI: Float
-            if validValues.isEmpty {
-                medianNDVI = 0
+            if finalValidValues.isEmpty {
+                medianNDVI = .nan
             } else {
-                let sorted = validValues.sorted()
+                let sorted = finalValidValues.sorted()
                 let mid = sorted.count / 2
                 medianNDVI = sorted.count % 2 == 0 ? (sorted[mid - 1] + sorted[mid]) / 2 : sorted[mid]
             }
 
-            // Drop frames with no valid data after masking
-            if validCount == 0 {
-                log.warn("\(dateStr) [\(srcName)]: no valid pixels after masking — dropped")
-                return nil
+            if finalValidCount == 0 {
+                log.warn("\(dateStr) [\(srcName)]: no valid pixels after masking — kept for thumbnail")
+            } else {
+                log.success("\(dateStr) [\(srcName)]: \(finalValidCount)/\(polyPixelCount) valid, median \(viMode.rawValue)=\(String(format: "%.3f", medianNDVI)), cloud=\(Int(cloudPercent))%")
             }
-
-            log.success("\(dateStr) [\(srcName)]: \(validCount)/\(polyPixelCount) valid, median \(viMode.rawValue)=\(String(format: "%.3f", medianNDVI)), cloud=\(Int(cloudPercent))%")
 
             let date = item.date ?? Date()
 
@@ -1304,17 +1447,17 @@ class NDVIProcessor {
             return NDVIFrame(
                 date: date,
                 dateString: item.dateString,
-                ndvi: ndvi,
+                ndvi: finalNdvi,
                 width: width,
                 height: height,
                 cloudFraction: cloudPercent / 100.0,
                 medianNDVI: medianNDVI,
-                validPixelCount: validCount,
+                validPixelCount: finalValidCount,
                 polyPixelCount: polyPixelCount,
-                redBand: red,
-                nirBand: nir,
-                greenBand: green,
-                blueBand: blue,
+                redBand: finalRed,
+                nirBand: finalNir,
+                greenBand: finalGreen,
+                blueBand: finalBlue,
                 sclBand: sclUpsampled,
                 polygonNorm: polyNorm,
                 greenURL: greenURL,
@@ -1546,7 +1689,7 @@ class NDVIProcessor {
 
         let medianNDVI: Float
         if validValues.isEmpty {
-            medianNDVI = 0
+            medianNDVI = .nan
         } else {
             let sorted = validValues.sorted()
             let mid = sorted.count / 2
@@ -1554,11 +1697,10 @@ class NDVIProcessor {
         }
 
         if validCount == 0 {
-            log.warn("\(dateStr) [\(srcName)]: no valid pixels after masking — dropped")
-            return nil
+            log.warn("\(dateStr) [\(srcName)]: no valid pixels after masking — kept for thumbnail")
+        } else {
+            log.success("\(dateStr) [\(srcName)]: \(validCount)/\(polyPixelCount) valid, median \(viMode.rawValue)=\(String(format: "%.3f", medianNDVI)), cloud=\(Int(cloudPercent))%")
         }
-
-        log.success("\(dateStr) [\(srcName)]: \(validCount)/\(polyPixelCount) valid, median \(viMode.rawValue)=\(String(format: "%.3f", medianNDVI)), cloud=\(Int(cloudPercent))%")
 
         let date = item.date ?? Date()
         let polyNorm = polyPixels.map { (x: $0.col / Double(width), y: $0.row / Double(height)) }
@@ -1724,16 +1866,19 @@ class NDVIProcessor {
                     let redRefl = (redDN + frame.dnOffset) / quantificationValue
                     let nirRefl = (nirDN + frame.dnOffset) / quantificationValue
 
-                    if redRefl < 0 || nirRefl < 0 || redRefl > 1.5 || nirRefl > 1.5 { continue }
+                    // Allow small negatives (atmospheric correction noise), reject clearly non-physical
+                    if redRefl < -0.05 || nirRefl < -0.05 || redRefl > 1.5 || nirRefl > 1.5 { continue }
+                    let redR = max(Float(0), redRefl)
+                    let nirR = max(Float(0), nirRefl)
 
                     let val: Float
                     switch viMode {
                     case .ndvi:
-                        let sum = nirRefl + redRefl
+                        let sum = nirR + redR
                         guard sum > 0 else { continue }
-                        val = (nirRefl - redRefl) / sum
+                        val = (nirR - redR) / sum
                     case .dvi:
-                        val = nirRefl - redRefl
+                        val = nirR - redR
                     }
                     ndvi[row][col] = val
                     validValues.append(val)
@@ -1774,6 +1919,62 @@ class NDVIProcessor {
         return url
     }
 
+    // MARK: - DN Offset (Per-Source)
+
+    /// Determine DN offset for reflectance conversion.
+    /// Fixed per source — does NOT depend on processing baseline:
+    ///   AWS:       0  (earth-search pre-applies the BOA offset to pixel values)
+    ///   PC/CDSE:  -1000  (raw ESA DNs, all baselines)
+    ///   Earthdata: 0  (HLS reflectance * 10000)
+    ///   GEE:       0  (harmonized, offset removed)
+    static func determineDNOffset(
+        red: [[UInt16]], nir: [[UInt16]],
+        sclMask: [[Bool]]?, cloudMask: Bool,
+        polyPixels: [(col: Double, row: Double)],
+        width: Int, height: Int,
+        item: STACItem, sourceID: SourceID?,
+        log: ActivityLog, dateStr: String, srcName: String
+    ) -> Float {
+        let pb = item.properties.processingBaseline ?? "?"
+
+        // Fixed per-source offset
+        let offset: Float
+        switch sourceID {
+        case .aws:       offset = 0      // pre-applied
+        case .earthdata: offset = 0      // HLS
+        case .planetary: offset = -1000  // raw ESA DNs, all PBs
+        case .cdse:      offset = -1000  // raw ESA DNs, all PBs
+        case .gee:       offset = 0      // harmonized
+        case .none:      offset = -1000  // default conservative
+        }
+
+        // Diagnostic: sample a few pixels to log reflectance range
+        var sampleCount = 0
+        var totalRed: Float = 0, totalNir: Float = 0
+        let stride = max(1, min(height, width) / 20)
+        for row in Swift.stride(from: 0, to: height, by: stride) {
+            for col in Swift.stride(from: 0, to: width, by: stride) {
+                guard pointInPolygon(x: Double(col) + 0.5, y: Double(row) + 0.5, polygon: polyPixels) else { continue }
+                if cloudMask, let mask = sclMask, mask[row][col] { continue }
+                let r = red[row][col], n = nir[row][col]
+                if r == 0 || n == 0 || r == 65535 || n == 65535 { continue }
+                totalRed += (Float(r) + offset) / 10000.0
+                totalNir += (Float(n) + offset) / 10000.0
+                sampleCount += 1
+            }
+        }
+
+        if sampleCount > 0 {
+            let avgRed = totalRed / Float(sampleCount)
+            let avgNir = totalNir / Float(sampleCount)
+            log.info("\(dateStr) [\(srcName)]: offset=\(Int(offset)) PB=\(pb) avgRefl red=\(String(format: "%.3f", avgRed)) nir=\(String(format: "%.3f", avgNir)) (n=\(sampleCount))")
+        } else {
+            log.info("\(dateStr) [\(srcName)]: offset=\(Int(offset)) PB=\(pb) (no valid samples to check)")
+        }
+
+        return offset
+    }
+
     /// Ray-casting point-in-polygon test.
     static func pointInPolygon(x: Double, y: Double, polygon: [(col: Double, row: Double)]) -> Bool {
         let n = polygon.count
@@ -1790,6 +1991,118 @@ class NDVIProcessor {
             j = i
         }
         return inside
+    }
+
+    /// Check if a pixel should be included based on fractional coverage within the polygon.
+    /// Returns true if the pixel center is inside, OR if the pixel has ≥ threshold fractional
+    /// area overlap with the polygon (computed via Sutherland-Hodgman clipping).
+    /// `threshold` is in [0, 1], e.g. 0.01 = 1%.
+    static func pixelInAOI(
+        col: Int, row: Int,
+        polygon: [(col: Double, row: Double)],
+        threshold: Double
+    ) -> Bool {
+        // Fast path: center inside → definitely included
+        if pointInPolygon(x: Double(col) + 0.5, y: Double(row) + 0.5, polygon: polygon) {
+            return true
+        }
+        guard threshold < 1.0 else { return false }
+        // Compute fractional coverage via polygon clipping
+        let coverage = pixelCoverage(col: col, row: row, polygon: polygon)
+        return coverage >= threshold
+    }
+
+    /// Compute the fraction of a pixel's unit area that falls inside the polygon.
+    /// Uses Sutherland-Hodgman algorithm to clip the polygon against the pixel rectangle,
+    /// then computes the clipped area via the shoelace formula.
+    static func pixelCoverage(
+        col: Int, row: Int,
+        polygon: [(col: Double, row: Double)]
+    ) -> Double {
+        let n = polygon.count
+        guard n >= 3 else { return 0 }
+
+        let minX = Double(col), maxX = Double(col + 1)
+        let minY = Double(row), maxY = Double(row + 1)
+
+        // Quick reject: polygon bbox vs pixel bbox
+        var pMinX = Double.infinity, pMaxX = -Double.infinity
+        var pMinY = Double.infinity, pMaxY = -Double.infinity
+        for v in polygon {
+            pMinX = min(pMinX, v.col); pMaxX = max(pMaxX, v.col)
+            pMinY = min(pMinY, v.row); pMaxY = max(pMaxY, v.row)
+        }
+        guard pMaxX > minX && pMinX < maxX && pMaxY > minY && pMinY < maxY else { return 0 }
+
+        // Clip polygon against 4 pixel edges (Sutherland-Hodgman)
+        var clipped: [(x: Double, y: Double)] = polygon.map { (x: $0.col, y: $0.row) }
+
+        // Left edge: x >= minX
+        clipped = clipEdge(clipped) { $0.x >= minX } intersect: { p1, p2 in
+            let t = (minX - p1.x) / (p2.x - p1.x)
+            return (x: minX, y: p1.y + t * (p2.y - p1.y))
+        }
+        guard !clipped.isEmpty else { return 0 }
+
+        // Right edge: x <= maxX
+        clipped = clipEdge(clipped) { $0.x <= maxX } intersect: { p1, p2 in
+            let t = (maxX - p1.x) / (p2.x - p1.x)
+            return (x: maxX, y: p1.y + t * (p2.y - p1.y))
+        }
+        guard !clipped.isEmpty else { return 0 }
+
+        // Top edge: y >= minY
+        clipped = clipEdge(clipped) { $0.y >= minY } intersect: { p1, p2 in
+            let t = (minY - p1.y) / (p2.y - p1.y)
+            return (x: p1.x + t * (p2.x - p1.x), y: minY)
+        }
+        guard !clipped.isEmpty else { return 0 }
+
+        // Bottom edge: y <= maxY
+        clipped = clipEdge(clipped) { $0.y <= maxY } intersect: { p1, p2 in
+            let t = (maxY - p1.y) / (p2.y - p1.y)
+            return (x: p1.x + t * (p2.x - p1.x), y: maxY)
+        }
+        guard clipped.count >= 3 else { return 0 }
+
+        // Shoelace area (pixel area = 1.0)
+        return abs(shoelaceArea(clipped))
+    }
+
+    /// Sutherland-Hodgman: clip polygon against one half-plane edge.
+    private static func clipEdge(
+        _ polygon: [(x: Double, y: Double)],
+        inside: ((x: Double, y: Double)) -> Bool,
+        intersect: ((x: Double, y: Double), (x: Double, y: Double)) -> (x: Double, y: Double)
+    ) -> [(x: Double, y: Double)] {
+        guard let first = polygon.last else { return [] }
+        var output = [(x: Double, y: Double)]()
+        var prev = first
+        var prevIn = inside(prev)
+        for curr in polygon {
+            let currIn = inside(curr)
+            if currIn {
+                if !prevIn { output.append(intersect(prev, curr)) }
+                output.append(curr)
+            } else if prevIn {
+                output.append(intersect(prev, curr))
+            }
+            prev = curr
+            prevIn = currIn
+        }
+        return output
+    }
+
+    /// Signed area via shoelace formula.
+    private static func shoelaceArea(_ poly: [(x: Double, y: Double)]) -> Double {
+        var area = 0.0
+        let n = poly.count
+        for i in 0..<n {
+            let j = (i + 1) % n
+            area += poly[i].x * poly[j].y
+            area -= poly[j].x * poly[i].y
+        }
+        return area / 2.0
     }
 
 }

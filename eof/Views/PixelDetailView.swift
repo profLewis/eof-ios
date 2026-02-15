@@ -1,6 +1,60 @@
 import SwiftUI
 import Charts
 
+/// Vegetation index types computable from S2 bands
+enum VegetationIndex: String, CaseIterable, Identifiable {
+    case ndvi = "NDVI"
+    case savi = "SAVI"
+    case evi = "EVI"
+    case gndvi = "GNDVI"
+    case ndwi = "NDWI"
+
+    var id: String { rawValue }
+
+    var color: Color {
+        switch self {
+        case .ndvi: return .green
+        case .savi: return .orange
+        case .evi: return .cyan
+        case .gndvi: return .mint
+        case .ndwi: return .blue
+        }
+    }
+
+    /// Whether this index requires optional bands
+    var requiresGreen: Bool { self == .gndvi || self == .ndwi }
+    var requiresBlue: Bool { self == .evi }
+
+    /// Compute VI from reflectances (already offset-corrected)
+    func compute(red: Double, nir: Double, green: Double?, blue: Double?) -> Double? {
+        switch self {
+        case .ndvi:
+            let sum = nir + red
+            guard sum != 0 else { return nil }
+            return (nir - red) / sum
+        case .savi:
+            let sum = nir + red + 0.5
+            guard sum != 0 else { return nil }
+            return 1.5 * (nir - red) / sum
+        case .evi:
+            guard let b = blue else { return nil }
+            let denom = nir + 6 * red - 7.5 * b + 1
+            guard denom != 0 else { return nil }
+            return 2.5 * (nir - red) / denom
+        case .gndvi:
+            guard let g = green else { return nil }
+            let sum = nir + g
+            guard sum != 0 else { return nil }
+            return (nir - g) / sum
+        case .ndwi:
+            guard let g = green else { return nil }
+            let sum = g + nir
+            guard sum != 0 else { return nil }
+            return (g - nir) / sum
+        }
+    }
+}
+
 /// Detail sheet showing per-pixel NDVI time series, DL fit, and reflectance data.
 struct PixelDetailView: View {
     @Binding var isPresented: Bool
@@ -10,12 +64,15 @@ struct PixelDetailView: View {
     let pixelFit: PixelPhenology?
     let medianFit: DLParams?
 
+    @State private var activeVIs: Set<VegetationIndex> = [.ndvi]
+
     var body: some View {
         NavigationStack {
             ScrollView {
                 VStack(spacing: 12) {
                     pixelHeader
                     rejectionDetailSection
+                    viToggles
                     pixelNDVIChart
                     if let fit = pixelFit, let median = medianFit {
                         parameterComparison(pixel: fit.params, median: median)
@@ -70,22 +127,61 @@ struct PixelDetailView: View {
         }
     }
 
-    // MARK: - NDVI Time Series
+    // MARK: - VI Toggles
+
+    /// Which VIs can be computed given available bands
+    private var availableVIs: [VegetationIndex] {
+        let hasGreen = frames.contains { $0.greenBand != nil }
+        let hasBlue = frames.contains { $0.blueBand != nil }
+        return VegetationIndex.allCases.filter { vi in
+            if vi.requiresGreen && !hasGreen { return false }
+            if vi.requiresBlue && !hasBlue { return false }
+            return true
+        }
+    }
+
+    private var viToggles: some View {
+        HStack(spacing: 8) {
+            Text("Indices")
+                .font(.caption.bold())
+            ForEach(availableVIs) { vi in
+                Button {
+                    if activeVIs.contains(vi) {
+                        if activeVIs.count > 1 { activeVIs.remove(vi) }
+                    } else {
+                        activeVIs.insert(vi)
+                    }
+                } label: {
+                    Text(vi.rawValue)
+                        .font(.system(size: 9).bold())
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 3)
+                        .background(activeVIs.contains(vi) ? vi.color.opacity(0.25) : Color.clear, in: Capsule())
+                        .foregroundStyle(activeVIs.contains(vi) ? vi.color : .secondary)
+                        .overlay(Capsule().stroke(vi.color.opacity(0.4), lineWidth: 0.5))
+                }
+                .buttonStyle(.plain)
+            }
+            Spacer()
+        }
+    }
+
+    // MARK: - VI Time Series
 
     private var pixelNDVIChart: some View {
         let sorted = frames.sorted { $0.date < $1.date }
         let cal = Calendar.current
 
-        // Extract this pixel's NDVI values
-        struct PixelPoint: Identifiable {
+        struct VIPoint: Identifiable {
             let id: String
             let date: Date
-            let ndvi: Double
-            let isFiltered: Bool  // removed by cycle contamination filter
+            let value: Double
+            let vi: String
+            let isFiltered: Bool
         }
 
-        // Build all data points
-        let allData: [DoubleLogistic.DataPoint] = sorted.compactMap { frame in
+        // Build NDVI data for cycle contamination filter
+        let allNDVI: [DoubleLogistic.DataPoint] = sorted.compactMap { frame in
             guard row < frame.height, col < frame.width else { return nil }
             let val = frame.ndvi[row][col]
             guard !val.isNaN else { return nil }
@@ -94,32 +190,42 @@ struct PixelDetailView: View {
                 ndvi: Double(val)
             )
         }
-
-        // Run cycle contamination filter to find which points survive
-        let filtered = DoubleLogistic.filterCycleContamination(data: allData)
+        let filtered = DoubleLogistic.filterCycleContamination(data: allNDVI)
         let filteredDoys = Set(filtered.map { $0.doy })
 
-        let points: [PixelPoint] = sorted.compactMap { frame in
-            guard row < frame.height, col < frame.width else { return nil }
-            let val = frame.ndvi[row][col]
-            guard !val.isNaN else { return nil }
-            let doy = Double(cal.ordinality(of: .day, in: .year, for: frame.date) ?? 1)
-            return PixelPoint(
-                id: frame.dateString, date: frame.date, ndvi: Double(val),
-                isFiltered: !filteredDoys.contains(doy)
-            )
+        // Build VI points for all active indices
+        var viPoints = [VIPoint]()
+        for vi in activeVIs {
+            for frame in sorted {
+                guard row < frame.height, col < frame.width else { continue }
+                let ofs = Double(frame.dnOffset)
+                let redRefl = (Double(frame.redBand[row][col]) + ofs) / 10000
+                let nirRefl = (Double(frame.nirBand[row][col]) + ofs) / 10000
+                let greenRefl: Double? = frame.greenBand.map { (Double($0[row][col]) + ofs) / 10000 }
+                let blueRefl: Double? = frame.blueBand.map { (Double($0[row][col]) + ofs) / 10000 }
+
+                guard let value = vi.compute(red: redRefl, nir: nirRefl, green: greenRefl, blue: blueRefl) else { continue }
+                guard !value.isNaN else { continue }
+
+                let doy = Double(cal.ordinality(of: .day, in: .year, for: frame.date) ?? 1)
+                viPoints.append(VIPoint(
+                    id: "\(vi.rawValue)_\(frame.dateString)",
+                    date: frame.date, value: value, vi: vi.rawValue,
+                    isFiltered: !filteredDoys.contains(doy)
+                ))
+            }
         }
 
-        // Generate fit curves
+        // DL fit curves (only for NDVI)
         struct CurvePoint: Identifiable {
             let id: String
             let date: Date
-            let ndvi: Double
+            let value: Double
             let series: String
         }
 
         var curvePoints = [CurvePoint]()
-        if let first = sorted.first, let last = sorted.last {
+        if activeVIs.contains(.ndvi), let first = sorted.first, let last = sorted.last {
             let year = cal.component(.year, from: first.date)
             let doyFirst = cal.ordinality(of: .day, in: .year, for: first.date) ?? 1
             let doyLast = cal.ordinality(of: .day, in: .year, for: last.date) ?? 365
@@ -131,7 +237,7 @@ struct PixelDetailView: View {
                     if let d = cal.date(from: DateComponents(year: year, day: doy)) {
                         curvePoints.append(CurvePoint(
                             id: "px_\(doy)", date: d,
-                            ndvi: fit.params.evaluate(t: Double(doy)),
+                            value: fit.params.evaluate(t: Double(doy)),
                             series: "Pixel fit"
                         ))
                     }
@@ -142,7 +248,7 @@ struct PixelDetailView: View {
                     if let d = cal.date(from: DateComponents(year: year, day: doy)) {
                         curvePoints.append(CurvePoint(
                             id: "med_\(doy)", date: d,
-                            ndvi: median.evaluate(t: Double(doy)),
+                            value: median.evaluate(t: Double(doy)),
                             series: "Median fit"
                         ))
                     }
@@ -150,21 +256,26 @@ struct PixelDetailView: View {
             }
         }
 
-        let nFiltered = points.filter { $0.isFiltered }.count
+        let nFiltered = viPoints.filter { $0.vi == "NDVI" && $0.isFiltered }.count
 
         return VStack(alignment: .leading, spacing: 2) {
             HStack(spacing: 6) {
-                Text("NDVI")
-                    .font(.caption.bold())
-                if pixelFit != nil {
-                    Text("Pixel fit")
-                        .font(.system(size: 8).bold())
-                        .foregroundStyle(.yellow)
+                ForEach(Array(activeVIs).sorted(by: { $0.rawValue < $1.rawValue })) { vi in
+                    Text(vi.rawValue)
+                        .font(.caption.bold())
+                        .foregroundStyle(vi.color)
                 }
-                if medianFit != nil {
-                    Text("Median fit")
-                        .font(.system(size: 8))
-                        .foregroundStyle(.green.opacity(0.4))
+                if activeVIs.contains(.ndvi) {
+                    if pixelFit != nil {
+                        Text("Pixel fit")
+                            .font(.system(size: 8).bold())
+                            .foregroundStyle(.yellow)
+                    }
+                    if medianFit != nil {
+                        Text("Median fit")
+                            .font(.system(size: 8).bold())
+                            .foregroundStyle(.green)
+                    }
                 }
                 if nFiltered > 0 {
                     Text("\(nFiltered) filtered")
@@ -173,35 +284,36 @@ struct PixelDetailView: View {
                 }
             }
             Chart {
-                // Good points (green)
-                ForEach(points.filter { !$0.isFiltered }) { pt in
+                // Good data points per VI
+                ForEach(viPoints.filter { !$0.isFiltered }) { pt in
                     PointMark(
                         x: .value("Date", pt.date),
-                        y: .value("NDVI", pt.ndvi)
+                        y: .value("Value", pt.value)
                     )
-                    .foregroundStyle(.green)
+                    .foregroundStyle(VegetationIndex(rawValue: pt.vi)?.color ?? .green)
                     .symbolSize(30)
                 }
-                // Filtered/outlier points (red, hollow)
-                ForEach(points.filter { $0.isFiltered }) { pt in
+                // Filtered/outlier points (red crosses, NDVI only)
+                ForEach(viPoints.filter { $0.isFiltered && $0.vi == "NDVI" }) { pt in
                     PointMark(
                         x: .value("Date", pt.date),
-                        y: .value("NDVI", pt.ndvi)
+                        y: .value("Value", pt.value)
                     )
                     .foregroundStyle(.red.opacity(0.6))
                     .symbolSize(30)
                     .symbol(.cross)
                 }
+                // DL fit curves
                 ForEach(curvePoints) { pt in
                     LineMark(
                         x: .value("Date", pt.date),
-                        y: .value("NDVI", pt.ndvi),
+                        y: .value("Value", pt.value),
                         series: .value("Series", pt.series)
                     )
-                    .foregroundStyle(pt.series == "Pixel fit" ? .yellow : .green.opacity(0.4))
+                    .foregroundStyle(pt.series == "Pixel fit" ? .yellow : .green)
                     .lineStyle(StrokeStyle(
-                        lineWidth: pt.series == "Pixel fit" ? 2 : 1,
-                        dash: pt.series == "Pixel fit" ? [] : [4, 2]
+                        lineWidth: pt.series == "Pixel fit" ? 2 : 3,
+                        dash: pt.series == "Pixel fit" ? [] : [4, 3]
                     ))
                 }
             }
@@ -217,7 +329,7 @@ struct PixelDetailView: View {
             Text("Parameters (pixel vs median)")
                 .font(.caption.bold())
             HStack(spacing: 0) {
-                ForEach(["", "mn", "amp", "sos", "rsp", "len", "rau", "mx", "eos"], id: \.self) { label in
+                ForEach(["", "mn", "amp", "sos", "rsp", "season", "rau", "mx", "eos"], id: \.self) { label in
                     Text(label.isEmpty ? "" : label)
                         .font(.system(size: 8).bold())
                         .frame(maxWidth: .infinity)

@@ -10,6 +10,16 @@ enum SourceID: String, CaseIterable, Codable, Identifiable {
 
     var id: String { rawValue }
 
+    var shortLabel: String {
+        switch self {
+        case .aws: return "AWS"
+        case .planetary: return "PC"
+        case .cdse: return "CDSE"
+        case .earthdata: return "NASA"
+        case .gee: return "GEE"
+        }
+    }
+
     var icon: String {
         switch self {
         case .aws: return "cloud"

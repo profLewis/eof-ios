@@ -10,6 +10,7 @@ struct SettingsView: View {
     @State private var showingAOI = false
     @State private var showingDataSources = false
     @State private var showingSCLMask = false
+    @State private var showingParameterBounds = false
 
     var body: some View {
         NavigationStack {
@@ -52,7 +53,13 @@ struct SettingsView: View {
                     }
 
                     Toggle("SCL Class Boundaries", isOn: $settings.showSCLBoundaries)
+                    Text("Draw outlines around contiguous SCL regions on the map.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                     Toggle("SCL Colors on Masked Pixels", isOn: $settings.showMaskedClassColors)
+                    Text("Show SCL class colors for masked pixels instead of leaving them transparent.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                     Toggle("Satellite Basemap", isOn: $settings.showBasemap)
                     if settings.showBasemap {
                         Text("Apple Maps satellite imagery (date varies by location, typically 1-3 years old)")
@@ -60,13 +67,17 @@ struct SettingsView: View {
                             .foregroundStyle(.secondary)
                     }
 
-                    Picker("Playback Speed", selection: $settings.playbackSpeed) {
-                        Text("0.5x").tag(0.5)
-                        Text("1x").tag(1.0)
-                        Text("2x").tag(2.0)
-                        Text("4x").tag(4.0)
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Playback Speed")
+                            .font(.subheadline)
+                        Picker("Playback Speed", selection: $settings.playbackSpeed) {
+                            Text("0.5x").tag(0.5)
+                            Text("1x").tag(1.0)
+                            Text("2x").tag(2.0)
+                            Text("4x").tag(4.0)
+                        }
+                        .pickerStyle(.segmented)
                     }
-                    .pickerStyle(.segmented)
                 }
 
                 Section {
@@ -137,6 +148,25 @@ struct SettingsView: View {
 
                 Section("Filters") {
                     Toggle("Enforce AOI Polygon", isOn: $settings.enforceAOI)
+                    if settings.enforceAOI {
+                        VStack(alignment: .leading, spacing: 4) {
+                            HStack {
+                                Text("Pixel Coverage")
+                                Spacer()
+                                Text("\(Int(settings.pixelCoverageThreshold * 100))%")
+                                    .monospacedDigit()
+                                    .foregroundStyle(.secondary)
+                            }
+                            Slider(value: $settings.pixelCoverageThreshold, in: 0.01...0.50, step: 0.01)
+                        }
+                        Text("Minimum fraction of a pixel that must overlap the AOI polygon to be included. Uses Sutherland-Hodgman clipping.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    } else {
+                        Text("When off, all pixels in the image chip are processed regardless of AOI boundary.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
                     Toggle("SCL Mask", isOn: $settings.cloudMask)
                     if settings.cloudMask {
                         Button {
@@ -150,6 +180,9 @@ struct SettingsView: View {
                                     .foregroundStyle(.secondary)
                             }
                         }
+                        Text("Pixels with invalid SCL classes are masked (set to NaN).")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
                     }
                     VStack(alignment: .leading, spacing: 8) {
                         HStack {
@@ -161,14 +194,18 @@ struct SettingsView: View {
                         }
                         Slider(value: $settings.cloudThreshold, in: 0...100, step: 5)
                     }
-                    Text("SCL mask hides pixels by class. Threshold skips entire scenes. When AOI polygon is off, all pixels in the chip are processed.")
+                    Text("Scenes exceeding this cloud fraction are skipped entirely during search.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
 
-                Section("Per-Pixel Phenology") {
+                Section("Fitting — Optimization") {
                     Stepper("Ensemble Runs: \(settings.pixelEnsembleRuns)",
                             value: $settings.pixelEnsembleRuns, in: 1...20)
+                    Text("Number of random restarts per pixel. More runs find better fits but take longer.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+
                     VStack(alignment: .leading, spacing: 4) {
                         HStack {
                             Text("Perturbation")
@@ -179,9 +216,13 @@ struct SettingsView: View {
                         }
                         Slider(value: $settings.pixelPerturbation, in: 0.05...1.0, step: 0.05)
                     }
+                    Text("How much to jitter starting parameters between ensemble runs. Higher = wider search.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+
                     VStack(alignment: .leading, spacing: 4) {
                         HStack {
-                            Text("Slope Perturbation (rsp/rau)")
+                            Text("Slope Perturbation")
                             Spacer()
                             Text("\(Int(settings.pixelSlopePerturbation * 100))%")
                                 .monospacedDigit()
@@ -189,6 +230,45 @@ struct SettingsView: View {
                         }
                         Slider(value: $settings.pixelSlopePerturbation, in: 0.05...0.50, step: 0.05)
                     }
+                    Text("Separate jitter range for green-up/senescence slope (rsp/rau). Slopes are sensitive — keep lower than general perturbation.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                Section("Fitting — Second Pass") {
+                    Toggle("Second Pass (DL-weighted)", isOn: $settings.enableSecondPass)
+                    Text("Re-fit using weights derived from the first-pass DL curve. Observations near peak season get higher weight.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+
+                    if settings.enableSecondPass {
+                        VStack(alignment: .leading, spacing: 4) {
+                            HStack {
+                                Text("Weight Min")
+                                Spacer()
+                                Text(String(format: "%.1f", settings.secondPassWeightMin))
+                                    .monospacedDigit()
+                                    .foregroundStyle(.secondary)
+                            }
+                            Slider(value: $settings.secondPassWeightMin, in: 0.1...2.0, step: 0.1)
+                        }
+                        VStack(alignment: .leading, spacing: 4) {
+                            HStack {
+                                Text("Weight Max")
+                                Spacer()
+                                Text(String(format: "%.1f", settings.secondPassWeightMax))
+                                    .monospacedDigit()
+                                    .foregroundStyle(.secondary)
+                            }
+                            Slider(value: $settings.secondPassWeightMax, in: 1.0...5.0, step: 0.1)
+                        }
+                        Text("DL curve values are rescaled to [min, max] as observation weights. Higher max emphasizes peak-season data more strongly.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                Section("Fitting — Quality Control") {
                     VStack(alignment: .leading, spacing: 4) {
                         HStack {
                             Text("RMSE Threshold")
@@ -199,11 +279,19 @@ struct SettingsView: View {
                         }
                         Slider(value: $settings.pixelFitRMSEThreshold, in: 0.02...0.30, step: 0.01)
                     }
+                    Text("Fits with RMSE above this are marked 'poor'. Lower = stricter quality requirement.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+
                     Stepper("Min Observations: \(settings.pixelMinObservations)",
                             value: $settings.pixelMinObservations, in: 3...10)
+                    Text("Pixels with fewer valid observations are skipped (use median fit instead).")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+
                     VStack(alignment: .leading, spacing: 4) {
                         HStack {
-                            Text("Cluster Filter Threshold")
+                            Text("Cluster Filter")
                             Spacer()
                             Text(String(format: "%.1f MADs", settings.clusterFilterThreshold))
                                 .monospacedDigit()
@@ -211,15 +299,47 @@ struct SettingsView: View {
                         }
                         Slider(value: $settings.clusterFilterThreshold, in: 2.0...8.0, step: 0.5)
                     }
-                    Stepper("Min Season Length: \(settings.minSeasonLength) days",
-                            value: $settings.minSeasonLength, in: 10...200, step: 10)
-                    Stepper("Max Season Length: \(settings.maxSeasonLength) days",
-                            value: $settings.maxSeasonLength, in: 100...365, step: 10)
-                    Stepper("Slope Symmetry: \(settings.slopeSymmetry)%",
-                            value: $settings.slopeSymmetry, in: 0...100, step: 5)
-                    Text("Per-pixel fitting uses median fit as starting point. Higher perturbation explores more but is slower. Cluster filter threshold controls outlier sensitivity — lower values are stricter. Slope symmetry constrains senescence rate to be within N% of green-up rate (0 = unconstrained). Season length is optimized directly as a parameter.")
+                    Text("Outlier detection: pixels whose parameters are more than N median absolute deviations from the median are flagged. Lower = stricter.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                }
+
+                Section("Fitting — Season Constraints") {
+                    Stepper("Min Season: \(settings.minSeasonLength) days",
+                            value: $settings.minSeasonLength, in: 10...200, step: 10)
+                    Stepper("Max Season: \(settings.maxSeasonLength) days",
+                            value: $settings.maxSeasonLength, in: 100...365, step: 10)
+                    Text("Constrains the growing season duration (SOS to EOS). Prevents unrealistically short or long seasons.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+
+                    Stepper("Slope Symmetry: \(settings.slopeSymmetry)%",
+                            value: $settings.slopeSymmetry, in: 0...100, step: 5)
+                    Text("Constrains senescence rate (rau) to be within N% of green-up rate (rsp). 0% = unconstrained, 100% = symmetric.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                Section("Pixel Inspector") {
+                    Stepper("Window: \(settings.pixelInspectWindow)\u{00D7}\(settings.pixelInspectWindow)",
+                            value: $settings.pixelInspectWindow, in: 1...9, step: 2)
+                    Text("Size of the pixel neighbourhood shown when tapping the map. 1\u{00D7}1 = single pixel, 3\u{00D7}3 = 9 pixels, etc.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                Section {
+                    Button {
+                        showingParameterBounds = true
+                    } label: {
+                        HStack {
+                            Label("Parameter Bounds", systemImage: "ruler")
+                            Spacer()
+                            Text("Physical constraints")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
                 }
 
                 Section {
@@ -260,6 +380,10 @@ struct SettingsView: View {
                         onCompare?()
                     }
                 })
+                    .presentationDetents([.large])
+            }
+            .sheet(isPresented: $showingParameterBounds) {
+                ParameterBoundsView(isPresented: $showingParameterBounds)
                     .presentationDetents([.large])
             }
             .sheet(isPresented: $showingSCLMask) {
@@ -605,24 +729,68 @@ struct AboutView: View {
                     .padding(.vertical, 8)
                 }
 
+                Section("Author") {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Philip Lewis, UCL")
+                            .font(.subheadline.bold())
+                        Text("Assisted by Claude (Anthropic)")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
                 Section("Data Sources") {
-                    VStack(alignment: .leading, spacing: 6) {
+                    VStack(alignment: .leading, spacing: 4) {
                         Text("Sentinel-2 Level-2A")
                             .font(.subheadline.bold())
-                        Text("Surface reflectance (BOA) imagery from the Copernicus Sentinel-2 mission, accessed via Cloud Optimized GeoTIFF (COG) on AWS Open Data.")
+                        Text("Surface reflectance (BOA) from Copernicus Sentinel-2A/2B MSI. 13 spectral bands, 10\u{2013}60m resolution, 5-day revisit.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
                     .padding(.vertical, 2)
 
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text("AWS Earth Search STAC API")
-                            .font(.subheadline.bold())
-                        Text("SpatioTemporal Asset Catalog provided by Element 84. No authentication required.")
-                            .font(.caption)
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("AWS Earth Search")
+                            .font(.caption.bold())
+                        Text("STAC API by Element 84. COG format, no auth. DN/10000 = reflectance (no offset).")
+                            .font(.caption2)
                             .foregroundStyle(.secondary)
                     }
-                    .padding(.vertical, 2)
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Microsoft Planetary Computer")
+                            .font(.caption.bold())
+                        Text("STAC API + SAS token auth. PB\u{2265}04.00: reflectance = (DN\u{2212}1000)/10000.")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Copernicus Data Space (CDSE)")
+                            .font(.caption.bold())
+                        Text("ESA official archive. Bearer token auth. PB\u{2265}04.00: reflectance = (DN\u{2212}1000)/10000.")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("NASA Earthdata (HLS)")
+                            .font(.caption.bold())
+                        Text("Harmonized Landsat Sentinel-2. Bearer token auth. DN/10000 = reflectance.")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Google Earth Engine")
+                            .font(.caption.bold())
+                        Text("Pixel-level REST API. OAuth2 auth. Requires GCP project. DN/10000 = reflectance.")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("FAO Crop Calendar")
+                            .font(.caption.bold())
+                        Text("api-cropcalendar.apps.fao.org. Sowing/harvest dates by country and crop. ~60 countries.")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
                 }
 
                 Section("Copyright & License") {
@@ -681,11 +849,14 @@ struct AboutView: View {
 
                 Section("Technical Details") {
                     LabeledContent("Collection", value: "sentinel-2-l2a")
-                    LabeledContent("API", value: "earth-search.aws.element84.com")
                     LabeledContent("Format", value: "Cloud Optimized GeoTIFF")
-                    LabeledContent("Resolution", value: "10m (visible/NIR)")
-                    LabeledContent("SCL Resolution", value: "20m (upsampled)")
-                    LabeledContent("Auth Required", value: "None")
+                    LabeledContent("Resolution", value: "10m (B02\u{2013}B04, B08)")
+                    LabeledContent("SCL Resolution", value: "20m (upsampled to 10m)")
+                    LabeledContent("Processing", value: "L2A (Sen2Cor BOA)")
+                    LabeledContent("Phenology Model", value: "Beck double logistic")
+                    LabeledContent("Optimizer", value: "Nelder-Mead + Huber loss")
+                    LabeledContent("Fitting", value: "Ensemble + per-pixel")
+                    LabeledContent("Outlier Detection", value: "MAD-based cluster filter")
                 }
             }
             .navigationTitle("About")

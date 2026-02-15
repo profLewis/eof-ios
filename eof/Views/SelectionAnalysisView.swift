@@ -303,7 +303,7 @@ struct SelectionAnalysisView: View {
             paramLabel("amp", fit.delta, "%.2f")
             paramLabel("sos", fit.sos, "%.0f")
             paramLabel("rsp", fit.rsp, "%.3f")
-            paramLabel("len", fit.seasonLength, "%.0f")
+            paramLabel("season", fit.seasonLength, "%.0f")
             paramLabel("rau", fit.rau, "%.3f")
             paramLabel("mx", fit.mx, "%.2f", color: .secondary)
             paramLabel("eos", fit.eos, "%.0f", color: .secondary)
@@ -384,7 +384,7 @@ struct SelectionAnalysisView: View {
             )
         }
 
-        let paramNames = ["mn", "\u{0394}", "sos", "rsp", "len", "rau"]
+        let paramNames = ["mn", "amp", "sos", "rsp", "season", "rau"]
         let extractors: [(DLParams) -> Double] = [
             { $0.mn }, { $0.delta }, { $0.sos }, { $0.rsp }, { $0.seasonLength }, { $0.rau }
         ]

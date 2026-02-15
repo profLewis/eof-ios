@@ -30,7 +30,7 @@ struct DLParams: Codable, Equatable {
     var seasonLength: Double { eos - sos }
 
     /// Parameter labels for display (reparameterized).
-    static let labels = ["mn", "amp", "sos", "rsp", "len", "rau"]
+    static let labels = ["mn", "amp", "sos", "rsp", "season", "rau"]
 
     /// As reparameterized array for optimizer: [mn, delta, sos, rsp, seasonLength, rau].
     var asOptArray: [Double] {
@@ -52,6 +52,7 @@ enum DoubleLogistic {
     }
 
     /// Estimate initial parameters from observed data.
+    /// SOS defaults to ~1/4 through the DOY range if crossing detection fails.
     static func initialGuess(data: [DataPoint]) -> DLParams {
         guard !data.isEmpty else {
             return DLParams(mn: 0.1, mx: 0.6, sos: 120, rsp: 0.05, eos: 280, rau: 0.05)
@@ -62,11 +63,17 @@ enum DoubleLogistic {
         let mn = sorted[max(0, n / 10)].ndvi
         let mx = sorted[min(n - 1, n - 1 - n / 10)].ndvi
 
-        // Find approximate green-up: DOY where NDVI crosses midpoint rising
-        let mid = (mn + mx) / 2
         let bySeason = data.sorted { $0.doy < $1.doy }
-        var sos: Double = 120
-        var eos: Double = 280
+        let doyMin = bySeason.first!.doy
+        let doyMax = bySeason.last!.doy
+        let doyRange = doyMax - doyMin
+
+        // Default SOS at 1/4 through dataset, EOS at 3/4
+        var sos = doyMin + doyRange * 0.25
+        var eos = doyMin + doyRange * 0.75
+
+        // Try to find crossing points for more accurate estimate
+        let mid = (mn + mx) / 2
         // Green-up: first crossing above midpoint
         for i in 1..<bySeason.count {
             if bySeason[i - 1].ndvi < mid && bySeason[i].ndvi >= mid {
@@ -80,6 +87,11 @@ enum DoubleLogistic {
                 eos = bySeason[i].doy
                 break
             }
+        }
+
+        // Sanity: ensure eos > sos with reasonable season
+        if eos <= sos + 20 {
+            eos = sos + max(60, doyRange * 0.5)
         }
 
         return DLParams(mn: mn, mx: mx, sos: sos, rsp: 0.05, eos: eos, rau: 0.05)
@@ -103,19 +115,22 @@ enum DoubleLogistic {
     private static let huberDelta: Double = 0.10
 
     /// Compute mean Huber loss for a parameter set against data (for optimization).
-    static func huberLoss(params: DLParams, data: [DataPoint]) -> Double {
+    static func huberLoss(params: DLParams, data: [DataPoint], weights: [Double]? = nil) -> Double {
         guard !data.isEmpty else { return .infinity }
         let delta = huberDelta
         var sum = 0.0
-        for pt in data {
+        var wSum = 0.0
+        for (i, pt) in data.enumerated() {
+            let w = weights?[i] ?? 1.0
             let r = abs(params.evaluate(t: pt.doy) - pt.ndvi)
             if r <= delta {
-                sum += 0.5 * r * r
+                sum += w * 0.5 * r * r
             } else {
-                sum += delta * (r - 0.5 * delta)
+                sum += w * delta * (r - 0.5 * delta)
             }
+            wSum += w
         }
-        return sum / Double(data.count)
+        return sum / wSum
     }
 
     /// Fit using Nelder-Mead simplex optimization with Huber loss.
@@ -129,14 +144,16 @@ enum DoubleLogistic {
         maxIter: Int = 2000,
         minSeasonLength: Double = 0,
         maxSeasonLength: Double = 366,
-        slopeSymmetry: Double = 0
+        slopeSymmetry: Double = 0,
+        bounds: (lo: [Double], hi: [Double])? = nil,
+        weights: [Double]? = nil
     ) -> DLParams {
         let n = 6  // number of parameters
         let x0 = initial.asOptArray  // [mn, delta, sos, rsp, seasonLength, rau]
 
         // Bounds in reparameterized space
-        let lo = [-0.5, 0.05, 1.0, 0.02, max(minSeasonLength, 10), 0.02]
-        let hi = [0.8, 1.5, 365.0, 0.6, min(maxSeasonLength, 350), 0.6]
+        let lo = bounds?.lo ?? [-0.5, 0.05, 1.0, 0.02, max(minSeasonLength, 10), 0.02]
+        let hi = bounds?.hi ?? [0.8, 1.5, 365.0, 0.6, min(maxSeasonLength, 350), 0.6]
 
         func clamp(_ x: [Double]) -> [Double] {
             var c = x
@@ -155,7 +172,7 @@ enum DoubleLogistic {
 
         func cost(_ x: [Double]) -> Double {
             let p = DLParams.fromOpt(clamp(x))
-            return huberLoss(params: p, data: data)
+            return huberLoss(params: p, data: data, weights: weights)
         }
 
         // Initialize simplex
@@ -290,6 +307,19 @@ enum DoubleLogistic {
         return sorted
     }
 
+    /// Compute weights for second-pass fitting from a first-pass DL curve.
+    /// The DL curve is rescaled to [wMin, wMax] so observations near the peak of the
+    /// growing season get higher weight, while off-season observations get baseline weight.
+    static func secondPassWeights(data: [DataPoint], firstPass: DLParams,
+                                  wMin: Double = 1.0, wMax: Double = 2.0) -> [Double] {
+        let vals = data.map { firstPass.evaluate(t: $0.doy) }
+        let mn = vals.min() ?? 0
+        let mx = vals.max() ?? 1
+        let range = mx - mn
+        guard range > 1e-6 else { return [Double](repeating: 1.0, count: data.count) }
+        return vals.map { wMin + (wMax - wMin) * ($0 - mn) / range }
+    }
+
     /// Ensemble fit: run from many perturbed starting points, return all viable solutions.
     /// Perturbation is multiplicative: param * (1 + U(-p, p)) where U is uniform.
     /// Slope parameters (rsp, rau) use a separate, tighter perturbation fraction.
@@ -300,7 +330,9 @@ enum DoubleLogistic {
         slopePerturbation: Double = 0.10,
         minSeasonLength: Double = 0,
         maxSeasonLength: Double = 366,
-        slopeSymmetry: Double = 0
+        slopeSymmetry: Double = 0,
+        bounds: (lo: [Double], hi: [Double])? = nil,
+        secondPass: Bool = false
     ) -> (best: DLParams, ensemble: [DLParams]) {
         let filtered = filterCycleContamination(data: data)
         let guess = initialGuess(data: filtered)
@@ -308,6 +340,9 @@ enum DoubleLogistic {
 
         let p = perturbation
         let sp = slopePerturbation
+        // Use provided bounds or defaults for clamping
+        let blo = bounds?.lo ?? [-0.5, 0.05, 1.0, 0.02, max(minSeasonLength, 10), 0.02]
+        let bhi = bounds?.hi ?? [0.8, 1.5, 365.0, 0.6, min(maxSeasonLength, 350), 0.6]
 
         // Run from perturbed initial conditions
         for i in 0..<nRuns {
@@ -320,13 +355,13 @@ enum DoubleLogistic {
                 perturbed.rsp += guess.rsp * Double.random(in: -sp...sp)
                 perturbed.eos += guess.eos * Double.random(in: -p...p)
                 perturbed.rau += guess.rau * Double.random(in: -sp...sp)
-                // Clamp to physical bounds (SOS widened to full year)
-                perturbed.mn = max(-0.5, min(0.8, perturbed.mn))
-                perturbed.mx = max(0.0, min(1.5, perturbed.mx))
-                perturbed.sos = max(1, min(365, perturbed.sos))
-                perturbed.rsp = max(0.02, min(0.6, perturbed.rsp))
+                // Clamp to physical bounds from settings
+                perturbed.mn = max(blo[0], min(bhi[0], perturbed.mn))
+                perturbed.mx = max(perturbed.mn + blo[1], min(perturbed.mn + bhi[1], perturbed.mx))
+                perturbed.sos = max(blo[2], min(bhi[2], perturbed.sos))
+                perturbed.rsp = max(blo[3], min(bhi[3], perturbed.rsp))
                 perturbed.eos = max(perturbed.sos + minSeasonLength, min(perturbed.sos + maxSeasonLength, perturbed.eos))
-                perturbed.rau = max(0.02, min(0.6, perturbed.rau))
+                perturbed.rau = max(blo[5], min(bhi[5], perturbed.rau))
                 // Enforce mx > mn
                 if perturbed.mx <= perturbed.mn {
                     perturbed.mx = perturbed.mn + 0.1
@@ -334,12 +369,20 @@ enum DoubleLogistic {
             }
             let fitted = fit(data: filtered, initial: perturbed,
                            minSeasonLength: minSeasonLength, maxSeasonLength: maxSeasonLength,
-                           slopeSymmetry: slopeSymmetry)
+                           slopeSymmetry: slopeSymmetry, bounds: (blo, bhi))
             allFits.append(fitted)
         }
 
         allFits.sort { $0.rmse < $1.rmse }
-        let best = allFits[0]
+        var best = allFits[0]
+
+        // Second pass: refit with DL-derived weights
+        if secondPass {
+            let w = secondPassWeights(data: filtered, firstPass: best)
+            best = fit(data: filtered, initial: best,
+                      minSeasonLength: minSeasonLength, maxSeasonLength: maxSeasonLength,
+                      slopeSymmetry: slopeSymmetry, bounds: (blo, bhi), weights: w)
+        }
 
         // Keep solutions within 1.5x best RMSE as "viable"
         let threshold = best.rmse * 1.5
@@ -362,9 +405,10 @@ enum DoubleLogistic {
             return skip
         }
 
+        let b = settings.boundsArrays
         var bestFit = fit(data: filtered, initial: medianParams, maxIter: settings.maxIter,
                          minSeasonLength: settings.minSeasonLength, maxSeasonLength: settings.maxSeasonLength,
-                         slopeSymmetry: settings.slopeSymmetry)
+                         slopeSymmetry: settings.slopeSymmetry, bounds: b)
 
         for _ in 1..<settings.ensembleRuns {
             var perturbed = medianParams
@@ -376,13 +420,13 @@ enum DoubleLogistic {
             perturbed.rsp += medianParams.rsp * Double.random(in: -sp...sp)
             perturbed.eos += medianParams.eos * Double.random(in: -p...p)
             perturbed.rau += medianParams.rau * Double.random(in: -sp...sp)
-            // Clamp to bounds (SOS widened to full year)
-            perturbed.mn  = max(-0.5, min(0.8, perturbed.mn))
-            perturbed.mx  = max(0.0, min(1.5, perturbed.mx))
-            perturbed.sos = max(1, min(365, perturbed.sos))
-            perturbed.rsp = max(0.08, min(0.6, perturbed.rsp))
+            // Clamp to physical bounds from settings
+            perturbed.mn  = max(b.lo[0], min(b.hi[0], perturbed.mn))
+            perturbed.mx  = max(perturbed.mn + b.lo[1], min(perturbed.mn + b.hi[1], perturbed.mx))
+            perturbed.sos = max(b.lo[2], min(b.hi[2], perturbed.sos))
+            perturbed.rsp = max(b.lo[3], min(b.hi[3], perturbed.rsp))
             perturbed.eos = max(perturbed.sos + settings.minSeasonLength, min(perturbed.sos + settings.maxSeasonLength, perturbed.eos))
-            perturbed.rau = max(0.08, min(0.6, perturbed.rau))
+            perturbed.rau = max(b.lo[5], min(b.hi[5], perturbed.rau))
             // Enforce mx > mn
             if perturbed.mx <= perturbed.mn {
                 perturbed.mx = perturbed.mn + 0.1
@@ -390,10 +434,19 @@ enum DoubleLogistic {
 
             let candidate = fit(data: filtered, initial: perturbed, maxIter: settings.maxIter,
                               minSeasonLength: settings.minSeasonLength, maxSeasonLength: settings.maxSeasonLength,
-                              slopeSymmetry: settings.slopeSymmetry)
+                              slopeSymmetry: settings.slopeSymmetry, bounds: b)
             if candidate.rmse < bestFit.rmse {
                 bestFit = candidate
             }
+        }
+
+        // Second pass: refit with DL-derived weights from first pass
+        if settings.secondPass {
+            let w = secondPassWeights(data: filtered, firstPass: bestFit,
+                                      wMin: settings.secondPassWeightMin, wMax: settings.secondPassWeightMax)
+            bestFit = fit(data: filtered, initial: bestFit, maxIter: settings.maxIter,
+                         minSeasonLength: settings.minSeasonLength, maxSeasonLength: settings.maxSeasonLength,
+                         slopeSymmetry: settings.slopeSymmetry, bounds: b, weights: w)
         }
 
         return bestFit
@@ -411,4 +464,25 @@ struct PhenologyFitSettings: Sendable {
     let minSeasonLength: Double  // minimum eos - sos (days)
     let maxSeasonLength: Double  // maximum eos - sos (days)
     let slopeSymmetry: Double    // max % difference between rsp and rau (0 = unconstrained)
+    // Physical parameter bounds
+    let boundMnMin: Double
+    let boundMnMax: Double
+    let boundDeltaMin: Double
+    let boundDeltaMax: Double
+    let boundSosMin: Double
+    let boundSosMax: Double
+    let boundRspMin: Double
+    let boundRspMax: Double
+    let boundRauMin: Double
+    let boundRauMax: Double
+    let secondPass: Bool
+    let secondPassWeightMin: Double
+    let secondPassWeightMax: Double
+
+    /// Build lo/hi arrays for optimizer in reparameterized space [mn, delta, sos, rsp, seasonLength, rau]
+    var boundsArrays: (lo: [Double], hi: [Double]) {
+        let lo = [boundMnMin, boundDeltaMin, boundSosMin, boundRspMin, max(minSeasonLength, 10), boundRauMin]
+        let hi = [boundMnMax, boundDeltaMax, boundSosMax, boundRspMax, min(maxSeasonLength, 350), boundRauMax]
+        return (lo, hi)
+    }
 }

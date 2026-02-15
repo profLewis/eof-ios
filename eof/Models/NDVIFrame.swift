@@ -69,6 +69,14 @@ struct NDVIFrame: Identifiable, Codable {
         Calendar.current.ordinality(of: .day, in: .year, for: date) ?? 0
     }
 
+    /// Continuous DOY relative to a reference year. If this frame is in a later year,
+    /// DOY is offset by 365 per year difference. Handles datasets spanning year boundaries.
+    func continuousDOY(referenceYear: Int) -> Int {
+        let cal = Calendar.current
+        let yr = cal.component(.year, from: date)
+        return dayOfYear + (yr - referenceYear) * 365
+    }
+
     /// Day of year with year prefix for multi-year spans
     var dayOfYearLabel: String {
         let doy = dayOfYear

@@ -27,11 +27,14 @@ struct ContentView: View {
     @State private var showDLSliders = false
     // Per-pixel phenology
     @State private var pixelPhenology: PixelPhenologyResult?
+    @State private var pixelPhenologyBase: PixelPhenologyResult?  // original before RMSE reclassification
     @State private var pixelFitProgress: Double = 0
     @State private var isRunningPixelFit = false
+    @State private var lastPixelFitSettingsHash: Int = 0
     @State private var phenologyDisplayParam: PhenologyParameter?
     @State private var showingClusterView = false
     @State private var showData = true
+    @State private var dataOpacity: Double = 1.0
     // Cluster filter
     @State private var unfilteredPhenology: PixelPhenologyResult?
     @State private var isClusterFiltered = false
@@ -49,10 +52,29 @@ struct ContentView: View {
     @GestureState private var gestureZoom: CGFloat = 1.0
     @State private var panOffset: CGSize = .zero
     @State private var dragLastTranslation: CGSize?
+    // Pixel inspection (long-press to show per-pixel time series)
+    @State private var inspectedPixelRow: Int = 0
+    @State private var inspectedPixelCol: Int = 0
+    @State private var isInspectingPixel = false
+    @State private var pixelInspectTimer: Timer?
+    @State private var pixelFitTask: Task<Void, Never>?
 
     struct SelectionItem: Identifiable {
         let id = UUID()
         let minRow: Int, maxRow: Int, minCol: Int, maxCol: Int
+    }
+
+    /// Reference year for continuous DOY (first frame's year)
+    private var referenceYear: Int {
+        processor.frames.first.map { Calendar.current.component(.year, from: $0.date) } ?? 2022
+    }
+
+    /// DOY bounds from loaded dataset (continuous, handles year boundaries)
+    private var datasetDOYFirst: Int {
+        processor.frames.first?.continuousDOY(referenceYear: referenceYear) ?? 1
+    }
+    private var datasetDOYLast: Int {
+        processor.frames.last?.continuousDOY(referenceYear: referenceYear) ?? 365
     }
 
     var body: some View {
@@ -122,18 +144,42 @@ struct ContentView: View {
                 }
             }
             .onChange(of: settings.aoiSourceLabel) {
-                // Reset to idle when AOI changes so user re-fetches
-                if processor.status == .done || processor.status == .error {
-                    stopPlayback()
-                    currentFrameIndex = 0
-                    processor.resetGeometry()
-                    processor.status = .idle
-                    processor.frames = []
-                    processor.progress = 0
-                    processor.progressMessage = ""
-                    processor.errorMessage = nil
-                    basemapImage = nil  // clear stale basemap
-                }
+                // Cancel any in-progress download
+                processor.cancelFetch()
+                // Clear all data and restart when AOI changes
+                stopPlayback()
+                currentFrameIndex = 0
+                processor.resetGeometry()
+                processor.frames = []
+                processor.progress = 0
+                processor.progressMessage = ""
+                processor.errorMessage = nil
+                basemapImage = nil
+                // Clear phenology state
+                dlBest = nil
+                dlEnsemble = []
+                dlSliders = DLParams(mn: 0.1, mx: 0.7, sos: 120, rsp: 0.05, eos: 280, rau: 0.05)
+                pixelPhenology = nil
+                pixelPhenologyBase = nil
+                unfilteredPhenology = nil
+                pixelFitProgress = 0
+                pixelFitTask?.cancel()
+                pixelFitTask = nil
+                isRunningPixelFit = false
+                isClusterFiltered = false
+                phenologyDisplayParam = nil
+                showBadData = false
+                // Clear pixel inspection
+                isInspectingPixel = false
+                // Clear sub-AOI selection
+                isSelectMode = false
+                selectionItem = nil
+                // Reset zoom
+                zoomScale = 1.0
+                panOffset = .zero
+                // Auto-restart fetch
+                processor.status = .idle
+                startFetch()
             }
             .onChange(of: showingSettings) {
                 // When settings sheet is dismissed, check what changed
@@ -313,14 +359,27 @@ struct ContentView: View {
                     }
                 }
             case .done:
-                Label(processor.progressMessage, systemImage: "checkmark.circle.fill")
-                    .foregroundStyle(.green)
-                    .task {
-                        try? await Task.sleep(for: .seconds(5))
-                        if processor.status == .done {
-                            processor.progressMessage = ""
+                HStack {
+                    Label(processor.progressMessage, systemImage: "checkmark.circle.fill")
+                        .foregroundStyle(.green)
+                    if !processor.cachedFrames.isEmpty {
+                        Button {
+                            processor.revertToCached()
+                            currentFrameIndex = 0
+                        } label: {
+                            Label("Revert (\(processor.cachedFrames.count))", systemImage: "arrow.uturn.backward")
+                                .font(.caption)
                         }
+                        .buttonStyle(.bordered)
+                        .tint(.orange)
                     }
+                }
+                .task {
+                    try? await Task.sleep(for: .seconds(5))
+                    if processor.status == .done {
+                        processor.progressMessage = ""
+                    }
+                }
             case .error:
                 Label(processor.errorMessage ?? "Unknown error", systemImage: "exclamationmark.triangle.fill")
                     .foregroundStyle(.red)
@@ -394,12 +453,15 @@ struct ContentView: View {
                                         rejectionMap: showData ? currentRejectionMap : nil)
                                 .clipShape(RoundedRectangle(cornerRadius: 8))
                                 .shadow(radius: 2)
-                                .opacity(showData ? 1.0 : 0.0)
-                                .background {
-                                    if !showData, let bm = basemapImage {
+                                .opacity(showData ? dataOpacity : 0.0)
+                                .background(alignment: .top) {
+                                    if let bm = basemapImage {
                                         let imgW = CGFloat(frame.width) * fitScale
-                                        Image(decorative: bm, scale: CGFloat(bm.width) / imgW)
+                                        let imgH = CGFloat(frame.height) * fitScale
+                                        Image(decorative: bm, scale: 1)
+                                            .resizable()
                                             .interpolation(.high)
+                                            .frame(width: imgW, height: imgH)
                                             .clipShape(RoundedRectangle(cornerRadius: 8))
                                     }
                                 }
@@ -418,6 +480,18 @@ struct ContentView: View {
                                     .background(Color.yellow.opacity(0.15))
                                     .frame(width: rect.width, height: rect.height)
                                     .position(x: rect.midX, y: rect.midY)
+                                    .allowsHitTesting(false)
+                            }
+
+                            // Pixel inspection crosshair
+                            if isInspectingPixel {
+                                let cx = (CGFloat(inspectedPixelCol) + 0.5) * fitScale * currentZoom + panOffset.width
+                                let cy = (CGFloat(inspectedPixelRow) + 0.5) * fitScale * currentZoom + panOffset.height
+                                let w = CGFloat(settings.pixelInspectWindow) * fitScale * currentZoom
+                                Rectangle()
+                                    .stroke(.cyan, lineWidth: 2)
+                                    .frame(width: max(w, 6), height: max(w, 6))
+                                    .position(x: cx, y: cy)
                                     .allowsHitTesting(false)
                             }
 
@@ -452,6 +526,10 @@ struct ContentView: View {
                                     }
                                 }
                                 .onTapGesture { location in
+                                    if isInspectingPixel {
+                                        isInspectingPixel = false
+                                        return
+                                    }
                                     let (col, row) = screenToPixel(location, zoom: currentZoom, pan: panOffset, fitScale: fitScale)
                                     if showBadData, let pp = pixelPhenology {
                                         if row >= 0, row < pp.height, col >= 0, col < pp.width,
@@ -470,6 +548,7 @@ struct ContentView: View {
                                 .gesture(
                                     DragGesture(minimumDistance: 5)
                                         .onChanged { value in
+                                            guard !isInspectingPixel else { return }
                                             if isSelectMode {
                                                 selectionStart = value.startLocation
                                                 selectionEnd = value.location
@@ -502,15 +581,59 @@ struct ContentView: View {
                                             dragLastTranslation = nil
                                         }
                                 )
+                                // Long-press to inspect per-pixel time series
+                                .simultaneousGesture(
+                                    DragGesture(minimumDistance: 0)
+                                        .onChanged { value in
+                                            if pixelInspectTimer == nil && pixelPhenology != nil && !isInspectingPixel {
+                                                let startLoc = value.startLocation
+                                                let capturedZoom = currentZoom
+                                                let capturedPan = panOffset
+                                                let capturedScale = fitScale
+                                                pixelInspectTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: false) { _ in
+                                                    DispatchQueue.main.async {
+                                                        let (col, row) = screenToPixel(startLoc, zoom: capturedZoom, pan: capturedPan, fitScale: capturedScale)
+                                                        updatePixelInspection(row: row, col: col)
+                                                    }
+                                                }
+                                            }
+                                            // Update pixel position while dragging after inspection started
+                                            if isInspectingPixel {
+                                                let (col, row) = screenToPixel(value.location, zoom: currentZoom, pan: panOffset, fitScale: fitScale)
+                                                updatePixelInspection(row: row, col: col)
+                                            }
+                                            // Cancel timer if finger moves too much before it fires
+                                            if !isInspectingPixel {
+                                                let dist = sqrt(pow(value.translation.width, 2) + pow(value.translation.height, 2))
+                                                if dist > 10 {
+                                                    pixelInspectTimer?.invalidate()
+                                                    pixelInspectTimer = nil
+                                                }
+                                            }
+                                        }
+                                        .onEnded { _ in
+                                            pixelInspectTimer?.invalidate()
+                                            pixelInspectTimer = nil
+                                            // Selection sticks — tap to dismiss
+                                        }
+                                )
                         }
                         .clipped()
                         .overlay(alignment: .topTrailing) {
-                            Image(systemName: isPlaying ? "pause.fill" : "play.fill")
-                                .font(.caption)
-                                .padding(6)
-                                .background(.ultraThinMaterial, in: Circle())
-                                .padding(6)
-                                .opacity(0.7)
+                            VStack(spacing: 4) {
+                                Image(systemName: isPlaying ? "pause.fill" : "play.fill")
+                                    .font(.caption)
+                                    .padding(6)
+                                    .background(.ultraThinMaterial, in: Circle())
+                                if showData && basemapImage != nil {
+                                    Slider(value: $dataOpacity, in: 0.05...1.0)
+                                        .frame(width: 100)
+                                        .rotationEffect(.degrees(-90))
+                                        .frame(width: 28, height: 100)
+                                }
+                            }
+                            .padding(6)
+                            .opacity(0.7)
                         }
                         .overlay(alignment: .topLeading) {
                             HStack(spacing: 4) {
@@ -543,14 +666,6 @@ struct ContentView: View {
                                         .font(.caption)
                                         .padding(6)
                                         .background(isSelectMode ? AnyShapeStyle(.yellow.opacity(0.3)) : AnyShapeStyle(.ultraThinMaterial), in: Circle())
-                                }
-                                Button {
-                                    copyCurrentFrame(frame: frame)
-                                } label: {
-                                    Image(systemName: "doc.on.doc")
-                                        .font(.caption)
-                                        .padding(6)
-                                        .background(.ultraThinMaterial, in: Circle())
                                 }
                             }
                             .padding(6)
@@ -598,6 +713,7 @@ struct ContentView: View {
             // NDVI time series chart — synced with animation
             if processor.frames.count > 1 {
                 ndviChart
+                spectralChart
                 phenologySection
             }
 
@@ -621,8 +737,53 @@ struct ContentView: View {
 
     private var viLabel: String { settings.vegetationIndex.rawValue }
 
+    /// Hash of settings that affect per-pixel phenology fit.
+    /// When this changes after a fit, results are stale and need re-running.
+    private var pixelFitSettingsHash: Int {
+        var h = Hasher()
+        h.combine(settings.pixelEnsembleRuns)
+        h.combine(settings.pixelPerturbation)
+        h.combine(settings.pixelSlopePerturbation)
+        h.combine(settings.pixelFitRMSEThreshold)
+        h.combine(settings.pixelMinObservations)
+        h.combine(settings.minSeasonLength)
+        h.combine(settings.maxSeasonLength)
+        h.combine(settings.slopeSymmetry)
+        h.combine(settings.boundMnMin)
+        h.combine(settings.boundMnMax)
+        h.combine(settings.boundDeltaMin)
+        h.combine(settings.boundDeltaMax)
+        h.combine(settings.boundSosMin)
+        h.combine(settings.boundSosMax)
+        h.combine(settings.boundRspMin)
+        h.combine(settings.boundRspMax)
+        h.combine(settings.boundRauMin)
+        h.combine(settings.boundRauMax)
+        h.combine(settings.enableSecondPass)
+        h.combine(settings.enforceAOI)
+        h.combine(settings.ndviThreshold)
+        h.combine(settings.cloudMask)
+        // Include median fit identity
+        if let dl = dlBest {
+            h.combine(dl.mn)
+            h.combine(dl.mx)
+            h.combine(dl.sos)
+        }
+        return h.finalize()
+    }
+
+    /// True when per-pixel results exist but settings have changed since the fit was run.
+    private var pixelFitIsStale: Bool {
+        pixelPhenology != nil && lastPixelFitSettingsHash != pixelFitSettingsHash
+    }
+
     /// Chart y-axis label and value depending on display mode.
     private var chartLabel: String {
+        if isInspectingPixel {
+            let w = settings.pixelInspectWindow
+            let label = "Pixel (\(inspectedPixelCol), \(inspectedPixelRow))"
+            return w > 1 ? "\(label) [\(w)\u{00D7}\(w)]" : label
+        }
         switch settings.displayMode {
         case .ndvi, .fcc, .rcc, .scl: return "Median \(viLabel)"
         case .bandRed: return "Red (B04)"
@@ -670,29 +831,45 @@ struct ContentView: View {
             HStack {
                 Text(chartLabel)
                     .font(.caption.bold())
-                    .foregroundStyle(.green)
+                    .foregroundStyle(isInspectingPixel ? .orange : .green)
                 if let pp = pixelPhenology, pp.outlierCount > 0 {
                     Text("Filtered")
                         .font(.caption.bold())
                         .foregroundStyle(.yellow)
                 }
                 Spacer()
-                Text("Valid %")
+                Text("Valid")
                     .font(.caption.bold())
                     .foregroundStyle(.blue)
             }
 
             let sorted = processor.frames.sorted(by: { $0.date < $1.date })
+            let validSorted = sorted.filter { $0.validPixelCount > 0 }
             Chart {
-                // NDVI line
-                ForEach(sorted) { frame in
+                // NDVI line (dimmed when inspecting pixel)
+                ForEach(validSorted) { frame in
                     LineMark(
                         x: .value("Date", frame.date),
                         y: .value(viLabel, chartValue(for: frame)),
                         series: .value("Series", viLabel)
                     )
-                    .foregroundStyle(.green.opacity(0.6))
-                    .lineStyle(StrokeStyle(lineWidth: 2))
+                    .foregroundStyle(.green.opacity(isInspectingPixel ? 0.15 : 0.6))
+                    .lineStyle(StrokeStyle(lineWidth: isInspectingPixel ? 1 : 2,
+                                           dash: isInspectingPixel ? [4, 2] : []))
+                }
+
+                // Per-pixel NDVI time series (when inspecting)
+                if isInspectingPixel {
+                    let pixData = pixelNDVIData(sorted: sorted)
+                    ForEach(pixData) { pt in
+                        LineMark(
+                            x: .value("Date", pt.date),
+                            y: .value(viLabel, pt.ndvi),
+                            series: .value("Series", "Pixel")
+                        )
+                        .foregroundStyle(.orange.opacity(0.8))
+                        .lineStyle(StrokeStyle(lineWidth: 2))
+                    }
                 }
 
                 // Filtered median NDVI (after cluster filter) — open circles
@@ -726,21 +903,37 @@ struct ContentView: View {
                 }
 
                 // Small dots for NDVI
-                ForEach(sorted) { frame in
+                ForEach(validSorted) { frame in
                     PointMark(
                         x: .value("Date", frame.date),
                         y: .value(viLabel, chartValue(for: frame))
                     )
-                    .foregroundStyle(.green)
-                    .symbolSize(15)
+                    .foregroundStyle(.green.opacity(isInspectingPixel ? 0.15 : 1.0))
+                    .symbolSize(isInspectingPixel ? 8 : 15)
+                }
+
+                // Per-pixel NDVI dots
+                if isInspectingPixel {
+                    let pixData = pixelNDVIData(sorted: sorted)
+                    ForEach(pixData) { pt in
+                        PointMark(
+                            x: .value("Date", pt.date),
+                            y: .value(viLabel, pt.ndvi)
+                        )
+                        .foregroundStyle(.orange)
+                        .symbolSize(20)
+                    }
                 }
 
                 // Current frame indicator
                 if currentFrameIndex < processor.frames.count {
                     let current = processor.frames[currentFrameIndex]
+                    let frameY = isInspectingPixel
+                        ? (pixelValue(row: inspectedPixelRow, col: inspectedPixelCol, frame: current) ?? 0)
+                        : chartValue(for: current)
                     PointMark(
                         x: .value("Date", current.date),
-                        y: .value(viLabel, chartValue(for: current))
+                        y: .value(viLabel, frameY)
                     )
                     .foregroundStyle(.red)
                     .symbolSize(200)
@@ -765,6 +958,17 @@ struct ContentView: View {
 
                 // Double logistic curves
                 ForEach(dlCurvePoints(sorted: sorted), id: \.id) { pt in
+                    LineMark(
+                        x: .value("Date", pt.date),
+                        y: .value(viLabel, pt.ndvi),
+                        series: .value("Series", pt.series)
+                    )
+                    .foregroundStyle(pt.color)
+                    .lineStyle(pt.style)
+                }
+
+                // Pixel DL fit curve (when inspecting)
+                ForEach(pixelDLCurvePoints(sorted: sorted), id: \.id) { pt in
                     LineMark(
                         x: .value("Date", pt.date),
                         y: .value(viLabel, pt.ndvi),
@@ -822,6 +1026,212 @@ struct ContentView: View {
                     }
             )
             .animation(.easeInOut(duration: 0.15), value: currentFrameIndex)
+
+            // Pixel phenology parameters annotation
+            if isInspectingPixel, let pp = pixelPhenology,
+               inspectedPixelRow >= 0, inspectedPixelRow < pp.height,
+               inspectedPixelCol >= 0, inspectedPixelCol < pp.width,
+               let px = pp.pixels[inspectedPixelRow][inspectedPixelCol] {
+                HStack(spacing: 8) {
+                    if px.fitQuality == .good {
+                        Text("SOS \(Int(px.params.sos))")
+                        Text("EOS \(Int(px.params.eos))")
+                        Text("amp \(String(format: "%.2f", px.params.delta))")
+                        Text("rsp \(String(format: "%.3f", px.params.rsp))")
+                        Text("RMSE \(String(format: "%.3f", px.params.rmse))")
+                    } else {
+                        Text(px.fitQuality.rawValue.capitalized)
+                            .foregroundStyle(.red)
+                        Text("\(px.nValidObs) obs")
+                    }
+                }
+                .font(.system(size: 9).monospacedDigit())
+                .foregroundStyle(.cyan)
+            }
+        }
+    }
+
+    // MARK: - Spectral Plot
+
+    /// Sentinel-2 band center wavelengths (nm)
+    private static let bandWavelengths: [(band: String, nm: Double)] = [
+        ("B02", 490), ("B03", 560), ("B04", 665), ("B08", 842)
+    ]
+
+    /// Compute median reflectance for a single pixel (or AOI median) for each available band.
+    private func spectralValues(frame: NDVIFrame, pixelRow: Int? = nil, pixelCol: Int? = nil) -> [(nm: Double, refl: Double, band: String)] {
+        let ofs = frame.dnOffset
+        var result = [(nm: Double, refl: Double, band: String)]()
+
+        func singlePixel(_ band: [[UInt16]]?, row: Int, col: Int) -> Double? {
+            guard let b = band, row < b.count, col < b[row].count else { return nil }
+            let dn = b[row][col]
+            guard dn > 0, dn < 65535 else { return nil }
+            return Double((Float(dn) + ofs) / 10000.0)
+        }
+
+        if let r = pixelRow, let c = pixelCol {
+            // Single pixel mode
+            if let v = singlePixel(frame.redBand, row: r, col: c) { result.append((665, v, "B04")) }
+            if let v = singlePixel(frame.nirBand, row: r, col: c) { result.append((842, v, "B08")) }
+            if let v = singlePixel(frame.greenBand, row: r, col: c) { result.append((560, v, "B03")) }
+            if let v = singlePixel(frame.blueBand, row: r, col: c) { result.append((490, v, "B02")) }
+        } else {
+            // AOI median mode
+            result.append((665, medianReflectance(band: frame.redBand, frame: frame), "B04"))
+            result.append((842, medianReflectance(band: frame.nirBand, frame: frame), "B08"))
+            if frame.greenBand != nil {
+                result.append((560, medianReflectance(band: frame.greenBand, frame: frame), "B03"))
+            }
+            if frame.blueBand != nil {
+                result.append((490, medianReflectance(band: frame.blueBand, frame: frame), "B02"))
+            }
+        }
+        return result.filter { $0.refl > 0 }.sorted(by: { $0.nm < $1.nm })
+    }
+
+    @State private var showSpectralChart = false
+
+    private var spectralChart: some View {
+        Group {
+            if showSpectralChart, currentFrameIndex < processor.frames.count {
+                let current = processor.frames[currentFrameIndex]
+                let sorted = processor.frames.sorted(by: { $0.date < $1.date })
+
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack {
+                        Text("Spectral \u{2014} \(current.dateString)")
+                            .font(.caption.bold())
+                            .foregroundStyle(.primary)
+                        Spacer()
+                        Button {
+                            showSpectralChart = false
+                        } label: {
+                            Image(systemName: "xmark.circle.fill")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+
+                    spectralChartContent(current: current, sorted: sorted)
+                }
+            } else if !showSpectralChart && processor.frames.count > 1 {
+                Button {
+                    showSpectralChart = true
+                } label: {
+                    Label("Spectral Plot", systemImage: "waveform.path.ecg")
+                        .font(.caption)
+                }
+            }
+        }
+    }
+
+    private func spectralChartContent(current: NDVIFrame, sorted: [NDVIFrame]) -> some View {
+        // Current frame spectral data
+        let usePixel = isInspectingPixel
+        let currentVals = spectralValues(
+            frame: current,
+            pixelRow: usePixel ? inspectedPixelRow : nil,
+            pixelCol: usePixel ? inspectedPixelCol : nil
+        )
+
+        // Reference frames: peak NDVI and min NDVI for context
+        let peakFrame = sorted.max(by: { $0.medianNDVI < $1.medianNDVI })
+        let minFrame = sorted.min(by: { $0.medianNDVI < $1.medianNDVI })
+
+        struct SpectralPt: Identifiable {
+            let id: String
+            let nm: Double
+            let refl: Double
+            let series: String
+            let band: String
+        }
+
+        var pts = [SpectralPt]()
+        for v in currentVals {
+            pts.append(SpectralPt(id: "cur_\(v.band)", nm: v.nm, refl: v.refl,
+                                  series: "Current", band: v.band))
+        }
+
+        if let peak = peakFrame, peak.id != current.id {
+            let pv = spectralValues(frame: peak,
+                                    pixelRow: usePixel ? inspectedPixelRow : nil,
+                                    pixelCol: usePixel ? inspectedPixelCol : nil)
+            for v in pv {
+                pts.append(SpectralPt(id: "peak_\(v.band)", nm: v.nm, refl: v.refl,
+                                      series: "Peak (\(peak.dateString))", band: v.band))
+            }
+        }
+        if let mn = minFrame, mn.id != current.id, mn.id != peakFrame?.id {
+            let mv = spectralValues(frame: mn,
+                                    pixelRow: usePixel ? inspectedPixelRow : nil,
+                                    pixelCol: usePixel ? inspectedPixelCol : nil)
+            for v in mv {
+                pts.append(SpectralPt(id: "min_\(v.band)", nm: v.nm, refl: v.refl,
+                                      series: "Min (\(mn.dateString))", band: v.band))
+            }
+        }
+
+        return Chart(pts) { pt in
+            LineMark(
+                x: .value("Wavelength (nm)", pt.nm),
+                y: .value("Reflectance", pt.refl),
+                series: .value("Date", pt.series)
+            )
+            .foregroundStyle(by: .value("Date", pt.series))
+            .lineStyle(StrokeStyle(lineWidth: pt.series == "Current" ? 2.5 : 1.5,
+                                   dash: pt.series == "Current" ? [] : [4, 2]))
+
+            PointMark(
+                x: .value("Wavelength (nm)", pt.nm),
+                y: .value("Reflectance", pt.refl)
+            )
+            .foregroundStyle(by: .value("Date", pt.series))
+            .symbolSize(pt.series == "Current" ? 40 : 20)
+            .annotation(position: .top, spacing: 2) {
+                if pt.series == "Current" {
+                    Text(pt.band)
+                        .font(.system(size: 7))
+                        .foregroundStyle(.secondary)
+                }
+            }
+        }
+        .chartForegroundStyleScale([
+            "Current": Color.red,
+            "Peak (\(peakFrame?.dateString ?? ""))": Color.green.opacity(0.7),
+            "Min (\(minFrame?.dateString ?? ""))": Color.blue.opacity(0.7)
+        ])
+        .chartXScale(domain: 400...900)
+        .chartYScale(domain: 0...0.6)
+        .chartXAxis {
+            AxisMarks(values: [450, 500, 560, 665, 750, 842]) { value in
+                AxisGridLine()
+                AxisValueLabel {
+                    if let v = value.as(Double.self) {
+                        Text("\(Int(v))")
+                            .font(.system(size: 8))
+                    }
+                }
+            }
+        }
+        .chartYAxis {
+            AxisMarks(values: .automatic(desiredCount: 4)) { value in
+                AxisGridLine()
+                AxisValueLabel {
+                    if let v = value.as(Double.self) {
+                        Text(String(format: "%.2f", v))
+                            .font(.system(size: 8))
+                    }
+                }
+            }
+        }
+        .chartLegend(.visible)
+        .frame(height: 120)
+        .overlay(alignment: .bottom) {
+            Text("Wavelength (nm)")
+                .font(.system(size: 7))
+                .foregroundStyle(.secondary)
+                .offset(y: -2)
         }
     }
 
@@ -839,39 +1249,50 @@ struct ContentView: View {
     private func dlCurvePoints(sorted: [NDVIFrame]) -> [DLCurvePoint] {
         guard let first = sorted.first, let last = sorted.last else { return [] }
         let cal = Calendar.current
-        let year = cal.component(.year, from: first.date)
-        let doyFirst = cal.ordinality(of: .day, in: .year, for: first.date) ?? 1
-        let doyLast = cal.ordinality(of: .day, in: .year, for: last.date) ?? 365
-        let step = max(1, (doyLast - doyFirst) / 80)
-        let doys = stride(from: doyFirst, through: doyLast, by: step).map { $0 }
+        let refYr = cal.component(.year, from: first.date)
+        // Use continuous DOY (handles year boundaries)
+        let cdoyFirst = first.continuousDOY(referenceYear: refYr)
+        let cdoyLast = last.continuousDOY(referenceYear: refYr)
+        let nPts = 80
+        let step = max(1, (cdoyLast - cdoyFirst) / nPts)
+        let cdoys = stride(from: cdoyFirst, through: cdoyLast, by: step).map { $0 }
+
+        // Convert continuous DOY back to a Date for the chart x-axis
+        func dateForCDOY(_ cdoy: Int) -> Date? {
+            let yr = refYr + (cdoy - 1) / 365
+            let doy = ((cdoy - 1) % 365) + 1
+            return cal.date(from: DateComponents(year: yr, day: doy))
+        }
 
         var pts = [DLCurvePoint]()
 
-        // Ensemble curves (semi-transparent)
-        for (ei, ep) in dlEnsemble.prefix(15).enumerated() where ei > 0 {
-            for doy in doys {
-                if let d = cal.date(from: DateComponents(year: year, day: doy)) {
-                    pts.append(DLCurvePoint(
-                        id: "e\(ei)_\(doy)", date: d,
-                        ndvi: ep.evaluate(t: Double(doy)),
-                        series: "ens\(ei)",
-                        color: .yellow.opacity(0.15),
-                        style: StrokeStyle(lineWidth: 1)
-                    ))
+        // Ensemble curves (semi-transparent, hidden when inspecting pixel)
+        if !isInspectingPixel {
+            for (ei, ep) in dlEnsemble.prefix(15).enumerated() where ei > 0 {
+                for cdoy in cdoys {
+                    if let d = dateForCDOY(cdoy) {
+                        pts.append(DLCurvePoint(
+                            id: "e\(ei)_\(cdoy)", date: d,
+                            ndvi: ep.evaluate(t: Double(cdoy)),
+                            series: "ens\(ei)",
+                            color: .yellow.opacity(0.15),
+                            style: StrokeStyle(lineWidth: 1)
+                        ))
+                    }
                 }
             }
         }
 
-        // Best fit
+        // Best fit — always show as thick green
         if let dl = dlBest {
-            for doy in doys {
-                if let d = cal.date(from: DateComponents(year: year, day: doy)) {
+            for cdoy in cdoys {
+                if let d = dateForCDOY(cdoy) {
                     pts.append(DLCurvePoint(
-                        id: "fit_\(doy)", date: d,
-                        ndvi: dl.evaluate(t: Double(doy)),
+                        id: "fit_\(cdoy)", date: d,
+                        ndvi: dl.evaluate(t: Double(cdoy)),
                         series: "DL-fit",
-                        color: .yellow.opacity(0.9),
-                        style: StrokeStyle(lineWidth: 2)
+                        color: .green.opacity(isInspectingPixel ? 0.3 : 0.9),
+                        style: StrokeStyle(lineWidth: isInspectingPixel ? 1.5 : 3)
                     ))
                 }
             }
@@ -879,11 +1300,11 @@ struct ContentView: View {
 
         // Slider curve
         if showDLSliders {
-            for doy in doys {
-                if let d = cal.date(from: DateComponents(year: year, day: doy)) {
+            for cdoy in cdoys {
+                if let d = dateForCDOY(cdoy) {
                     pts.append(DLCurvePoint(
-                        id: "sl_\(doy)", date: d,
-                        ndvi: dlSliders.evaluate(t: Double(doy)),
+                        id: "sl_\(cdoy)", date: d,
+                        ndvi: dlSliders.evaluate(t: Double(cdoy)),
                         series: "DL-slider",
                         color: .cyan.opacity(0.8),
                         style: StrokeStyle(lineWidth: 1.5, dash: [4, 2])
@@ -903,37 +1324,40 @@ struct ContentView: View {
         guard let param = phenologyDisplayParam, let fit = dlBest,
               let firstDate = sorted.first?.date else { return [] }
         let cal = Calendar.current
-        let year = cal.component(.year, from: firstDate)
+        let refYr = cal.component(.year, from: firstDate)
         var pts = [DLCurvePoint]()
+
+        // Convert continuous DOY to Date (handles year boundaries)
+        func dateForCDOY(_ cdoy: Int) -> Date? {
+            let yr = refYr + (cdoy - 1) / 365
+            let doy = ((cdoy - 1) % 365) + 1
+            return cal.date(from: DateComponents(year: yr, day: doy))
+        }
 
         // rsp: tangent line at SOS showing green-up slope
         if param == .rsp || param == .sos || param == .seasonLength {
-            let sosDoy = max(1, min(365, Int(fit.sos)))
-            if let sosDate = cal.date(from: DateComponents(year: year, day: sosDoy)) {
+            let sosCDOY = Int(fit.sos)
+            if let sosDate = dateForCDOY(sosCDOY) {
                 if param == .rsp {
                     let sosNDVI = fit.evaluate(t: fit.sos)
                     let halfSpan = 20.0
                     let slope = fit.rsp * (fit.mx - fit.mn) * 0.25
-                    let d0 = max(1, sosDoy - Int(halfSpan))
-                    let d1 = min(365, sosDoy + Int(halfSpan))
-                    if let date0 = cal.date(from: DateComponents(year: year, day: d0)),
-                       let date1 = cal.date(from: DateComponents(year: year, day: d1)) {
+                    if let date0 = dateForCDOY(sosCDOY - Int(halfSpan)),
+                       let date1 = dateForCDOY(sosCDOY + Int(halfSpan)) {
                         pts.append(DLCurvePoint(id: "rsp_t0", date: date0,
                             ndvi: sosNDVI - slope * halfSpan, series: "rsp-tangent",
-                            color: .green, style: StrokeStyle(lineWidth: 2.5)))
+                            color: .orange, style: StrokeStyle(lineWidth: 2.5)))
                         pts.append(DLCurvePoint(id: "rsp_t1", date: date1,
                             ndvi: sosNDVI + slope * halfSpan, series: "rsp-tangent",
-                            color: .green, style: StrokeStyle(lineWidth: 2.5)))
+                            color: .orange, style: StrokeStyle(lineWidth: 2.5)))
                     }
-                    // Vertical dashed at SOS
                     pts.append(DLCurvePoint(id: "rsp_v0", date: sosDate, ndvi: -0.2,
-                        series: "sos-rule", color: .green.opacity(0.3),
+                        series: "sos-rule", color: .orange.opacity(0.3),
                         style: StrokeStyle(lineWidth: 1, dash: [4, 2])))
                     pts.append(DLCurvePoint(id: "rsp_v1", date: sosDate, ndvi: 1.0,
-                        series: "sos-rule", color: .green.opacity(0.3),
+                        series: "sos-rule", color: .orange.opacity(0.3),
                         style: StrokeStyle(lineWidth: 1, dash: [4, 2])))
                 } else {
-                    // SOS vertical line
                     pts.append(DLCurvePoint(id: "sos_v0", date: sosDate, ndvi: -0.2,
                         series: "sos-line", color: .primary, style: StrokeStyle(lineWidth: 2)))
                     pts.append(DLCurvePoint(id: "sos_v1", date: sosDate, ndvi: 1.0,
@@ -944,16 +1368,14 @@ struct ContentView: View {
 
         // rau: tangent line at EOS showing senescence slope
         if param == .rau || param == .seasonLength {
-            let eosDoy = max(1, min(365, Int(fit.eos)))
-            if let eosDate = cal.date(from: DateComponents(year: year, day: eosDoy)) {
+            let eosCDOY = Int(fit.eos)
+            if let eosDate = dateForCDOY(eosCDOY) {
                 if param == .rau {
                     let eosNDVI = fit.evaluate(t: fit.eos)
                     let halfSpan = 20.0
                     let slope = -fit.rau * (fit.mx - fit.mn) * 0.25
-                    let d0 = max(1, eosDoy - Int(halfSpan))
-                    let d1 = min(365, eosDoy + Int(halfSpan))
-                    if let date0 = cal.date(from: DateComponents(year: year, day: d0)),
-                       let date1 = cal.date(from: DateComponents(year: year, day: d1)) {
+                    if let date0 = dateForCDOY(eosCDOY - Int(halfSpan)),
+                       let date1 = dateForCDOY(eosCDOY + Int(halfSpan)) {
                         pts.append(DLCurvePoint(id: "rau_t0", date: date0,
                             ndvi: eosNDVI - slope * halfSpan, series: "rau-tangent",
                             color: .red, style: StrokeStyle(lineWidth: 2.5)))
@@ -1009,6 +1431,89 @@ struct ContentView: View {
         return pts
     }
 
+    // MARK: - Pixel Inspection Helpers
+
+    private struct PixelDataPoint: Identifiable {
+        let id: String
+        let date: Date
+        let ndvi: Double
+    }
+
+    /// Extract NxN window-averaged NDVI for the inspected pixel across all frames.
+    private func pixelNDVIData(sorted: [NDVIFrame]) -> [PixelDataPoint] {
+        guard isInspectingPixel else { return [] }
+        return sorted.compactMap { frame in
+            guard let val = pixelValue(row: inspectedPixelRow, col: inspectedPixelCol, frame: frame) else { return nil }
+            return PixelDataPoint(id: frame.id.uuidString, date: frame.date, ndvi: val)
+        }
+    }
+
+    /// Average NDVI over the NxN inspect window for a single frame.
+    private func pixelValue(row: Int, col: Int, frame: NDVIFrame) -> Double? {
+        let half = (settings.pixelInspectWindow - 1) / 2
+        var values = [Float]()
+        for dr in -half...half {
+            for dc in -half...half {
+                let r = row + dr, c = col + dc
+                guard r >= 0, r < frame.height, c >= 0, c < frame.width else { continue }
+                let v = frame.ndvi[r][c]
+                if !v.isNaN { values.append(v) }
+            }
+        }
+        guard !values.isEmpty else { return nil }
+        return Double(values.reduce(0, +)) / Double(values.count)
+    }
+
+    /// Generate DL curve points for the inspected pixel's phenology fit.
+    /// Shows the curve even for poor fits (only skipped pixels have no params to plot).
+    private func pixelDLCurvePoints(sorted: [NDVIFrame]) -> [DLCurvePoint] {
+        guard isInspectingPixel,
+              let pp = pixelPhenology,
+              inspectedPixelRow >= 0, inspectedPixelRow < pp.height,
+              inspectedPixelCol >= 0, inspectedPixelCol < pp.width,
+              let px = pp.pixels[inspectedPixelRow][inspectedPixelCol],
+              px.fitQuality != .skipped,
+              let first = sorted.first, let last = sorted.last else { return [] }
+
+        let cal = Calendar.current
+        let refYr = cal.component(.year, from: first.date)
+        let cdoyFirst = first.continuousDOY(referenceYear: refYr)
+        let cdoyLast = last.continuousDOY(referenceYear: refYr)
+        let step = max(1, (cdoyLast - cdoyFirst) / 80)
+
+        func dateForCDOY(_ cdoy: Int) -> Date? {
+            let yr = refYr + (cdoy - 1) / 365
+            let doy = ((cdoy - 1) % 365) + 1
+            return cal.date(from: DateComponents(year: yr, day: doy))
+        }
+
+        let isPoor = px.fitQuality != .good
+        let pxID = "\(inspectedPixelRow)_\(inspectedPixelCol)"
+        return stride(from: cdoyFirst, through: cdoyLast, by: step).compactMap { cdoy in
+            guard let d = dateForCDOY(cdoy) else { return nil }
+            return DLCurvePoint(
+                id: "pixdl_\(pxID)_\(cdoy)", date: d,
+                ndvi: px.params.evaluate(t: Double(cdoy)),
+                series: "DL-pixel-\(pxID)",
+                color: .blue.opacity(isPoor ? 0.5 : 0.9),
+                style: StrokeStyle(lineWidth: 3, dash: [6, 3])
+            )
+        }
+    }
+
+    /// Update the inspected pixel coordinates (called from long-press gesture).
+    private func updatePixelInspection(row: Int, col: Int) {
+        guard let pp = pixelPhenology,
+              row >= 0, row < pp.height, col >= 0, col < pp.width else { return }
+        inspectedPixelRow = row
+        inspectedPixelCol = col
+        if !isInspectingPixel {
+            isInspectingPixel = true
+            let generator = UIImpactFeedbackGenerator(style: .medium)
+            generator.impactOccurred()
+        }
+    }
+
     // MARK: - Phenology (Double Logistic)
 
     private var phenologySection: some View {
@@ -1041,13 +1546,19 @@ struct ContentView: View {
                 .font(.caption)
                 .buttonStyle(.bordered)
                 .tint(.yellow)
-                Button("Per-Pixel") {
-                    runPerPixelFit()
+                Button(isRunningPixelFit ? "Stop" : "Per-Pixel") {
+                    if isRunningPixelFit {
+                        pixelFitTask?.cancel()
+                        pixelFitTask = nil
+                        isRunningPixelFit = false
+                    } else {
+                        runPerPixelFit()
+                    }
                 }
                 .font(.caption)
                 .buttonStyle(.bordered)
-                .tint(.orange)
-                .disabled(dlBest == nil || isRunningPixelFit)
+                .tint(isRunningPixelFit ? .red : (pixelPhenology == nil ? .orange : (pixelFitIsStale ? .green : .red)))
+                .disabled(dlBest == nil && !isRunningPixelFit)
             }
 
             // Per-pixel progress
@@ -1071,40 +1582,22 @@ struct ContentView: View {
                             .foregroundStyle(.purple)
                     }
                     Spacer()
+                    Text("RMSE \(String(format: "%.2f", settings.pixelFitRMSEThreshold))")
+                        .font(.system(size: 8).monospacedDigit())
+                        .foregroundStyle(.orange)
                     Text("\(String(format: "%.1f", pp.computeTimeSeconds))s")
                         .font(.system(size: 8))
                         .foregroundStyle(.secondary)
                 }
-
-                // Cluster filter toggle + analysis
-                HStack(spacing: 8) {
-                    Toggle("Cluster Filter", isOn: Binding(
-                        get: { isClusterFiltered },
-                        set: { newValue in
-                            if newValue {
-                                applyClusterFilter()
-                            } else {
-                                removeClusterFilter()
-                            }
-                        }
-                    ))
-                    .toggleStyle(.button)
-                    .font(.caption)
-                    .tint(.purple)
-
-                    Button("Analysis") {
-                        showingClusterView = true
+                Slider(value: $settings.pixelFitRMSEThreshold, in: 0.02...0.50, step: 0.01)
+                    .tint(.orange)
+                    .onChange(of: settings.pixelFitRMSEThreshold) {
+                        guard let base = pixelPhenologyBase ?? pixelPhenology else { return }
+                        pixelPhenology = base.reclassified(rmseThreshold: settings.pixelFitRMSEThreshold)
                     }
-                    .font(.caption)
-                    .buttonStyle(.bordered)
-                    .tint(.purple.opacity(0.7))
 
-                }
-            }
-
-            // Parameter map selector (includes Bad Data option)
-            if pixelPhenology != nil {
-                HStack(spacing: 8) {
+                // Parameter map selector + cluster filter + analysis
+                HStack(spacing: 6) {
                     Menu {
                         Button {
                             phenologyDisplayParam = nil
@@ -1146,17 +1639,39 @@ struct ContentView: View {
                     } label: {
                         HStack(spacing: 4) {
                             Image(systemName: showBadData ? "exclamationmark.triangle.fill" : "map.fill")
-                                .font(.system(size: 9))
+                                .font(.system(size: 11))
                             Text(showBadData ? "Bad Data" : (phenologyDisplayParam?.rawValue ?? "Live"))
-                                .font(.system(size: 9).bold())
+                                .font(.system(size: 11, weight: .semibold))
                             Image(systemName: "chevron.up.chevron.down")
-                                .font(.system(size: 7))
+                                .font(.system(size: 8))
                         }
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 4)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 5)
                         .background(.ultraThinMaterial, in: Capsule())
                     }
                     .tint(showBadData ? .red : (phenologyDisplayParam != nil ? .orange : .green))
+
+                    Toggle("Cluster Filter", isOn: Binding(
+                        get: { isClusterFiltered },
+                        set: { newValue in
+                            if newValue {
+                                applyClusterFilter()
+                            } else {
+                                removeClusterFilter()
+                            }
+                        }
+                    ))
+                    .toggleStyle(.button)
+                    .font(.caption)
+                    .tint(.purple)
+
+                    Button("Analysis") {
+                        showingClusterView = true
+                    }
+                    .font(.caption)
+                    .buttonStyle(.bordered)
+                    .tint(.purple.opacity(0.7))
+
                     Spacer()
                 }
             }
@@ -1168,7 +1683,7 @@ struct ContentView: View {
                     dlParamLabel("amp", dl.delta, fmt: "%.2f")
                     dlParamLabel("sos", dl.sos, fmt: "%.0f")
                     dlParamLabel("rsp", dl.rsp, fmt: "%.3f")
-                    dlParamLabel("len", dl.seasonLength, fmt: "%.0f")
+                    dlParamLabel("season", dl.seasonLength, fmt: "%.0f")
                     dlParamLabel("rau", dl.rau, fmt: "%.3f")
                     dlParamLabel("mx", dl.mx, fmt: "%.2f", color: .secondary)
                     dlParamLabel("eos", dl.eos, fmt: "%.0f", color: .secondary)
@@ -1178,24 +1693,39 @@ struct ContentView: View {
             // Sliders
             if showDLSliders {
                 VStack(spacing: 6) {
-                    dlSlider("mn", $dlSliders.mn, range: -0.2...0.5, step: 0.01)
+                    dlSlider("mn", Binding(
+                        get: { dlSliders.mn },
+                        set: { newMn in
+                            let amp = dlSliders.mx - dlSliders.mn
+                            dlSliders.mn = newMn
+                            dlSliders.mx = newMn + amp
+                        }
+                    ), range: -0.2...0.5, step: 0.01)
                     dlSlider("amp", Binding(
                         get: { dlSliders.mx - dlSliders.mn },
                         set: { dlSliders.mx = dlSliders.mn + $0 }
                     ), range: 0.05...1.2, step: 0.01)
-                    dlSlider("sos", $dlSliders.sos, range: 1...365, step: 1)
+                    dlSlider("sos", Binding(
+                        get: { dlSliders.sos },
+                        set: { newSOS in
+                            let season = dlSliders.eos - dlSliders.sos
+                            dlSliders.sos = newSOS
+                            dlSliders.eos = newSOS + season
+                        }
+                    ), range: Double(datasetDOYFirst)...Double(datasetDOYLast), step: 1)
                     dlSlider("rsp", $dlSliders.rsp, range: 0.005...0.3, step: 0.005)
-                    dlSlider("len", Binding(
+                    dlSlider("season", Binding(
                         get: { dlSliders.eos - dlSliders.sos },
                         set: { dlSliders.eos = dlSliders.sos + $0 }
-                    ), range: 30...300, step: 1)
+                    ), range: 10...365, step: 1)
                     dlSlider("rau", $dlSliders.rau, range: 0.005...0.3, step: 0.005)
 
                     // Live RMSE for slider values
+                    let refYr = referenceYear
                     let sliderRMSE = DoubleLogistic.rmse(
                         params: dlSliders,
-                        data: processor.frames.map {
-                            DoubleLogistic.DataPoint(doy: Double($0.dayOfYear), ndvi: Double($0.medianNDVI))
+                        data: processor.frames.filter { $0.validPixelCount > 0 }.map {
+                            DoubleLogistic.DataPoint(doy: Double($0.continuousDOY(referenceYear: refYr)), ndvi: Double($0.medianNDVI))
                         }
                     )
                     HStack {
@@ -1269,14 +1799,19 @@ struct ContentView: View {
     }
 
     private func runDLFit() {
-        let data = processor.frames.map { f in
-            DoubleLogistic.DataPoint(doy: Double(f.dayOfYear), ndvi: Double(f.medianNDVI))
+        let refYr = referenceYear
+        let data = processor.frames.filter { $0.validPixelCount > 0 }.map { f in
+            DoubleLogistic.DataPoint(doy: Double(f.continuousDOY(referenceYear: refYr)), ndvi: Double(f.medianNDVI))
         }
         guard data.count >= 4 else { return }
         let p = settings.pixelPerturbation
         let sp = settings.pixelSlopePerturbation
         let minSL = Double(settings.minSeasonLength)
         let maxSL = Double(settings.maxSeasonLength)
+        let dlBounds: (lo: [Double], hi: [Double]) = (
+            [settings.boundMnMin, settings.boundDeltaMin, settings.boundSosMin, settings.boundRspMin, max(minSL, 10), settings.boundRauMin],
+            [settings.boundMnMax, settings.boundDeltaMax, settings.boundSosMax, settings.boundRspMax, min(maxSL, 350), settings.boundRauMax]
+        )
 
         // Log the initial guess and perturbation ranges
         let filtered = DoubleLogistic.filterCycleContamination(data: data)
@@ -1288,7 +1823,9 @@ struct ContentView: View {
             let initial = DoubleLogistic.ensembleFit(data: data,
                 perturbation: p, slopePerturbation: sp,
                 minSeasonLength: minSL, maxSeasonLength: maxSL,
-                slopeSymmetry: Double(settings.slopeSymmetry))
+                slopeSymmetry: Double(settings.slopeSymmetry),
+                bounds: dlBounds,
+                secondPass: settings.enableSecondPass)
 
             // Stage 2: identify outlier dates using MAD of residuals
             let residuals = data.map { pt in
@@ -1322,6 +1859,9 @@ struct ContentView: View {
                 guard cleanData.count >= 4 else {
                     await MainActor.run {
                         log.error("Too few dates remaining after outlier exclusion")
+                        dlBest = initial.best
+                        dlEnsemble = initial.ensemble
+                        dlSliders = initial.best
                     }
                     return
                 }
@@ -1330,19 +1870,31 @@ struct ContentView: View {
                 let result = DoubleLogistic.ensembleFit(data: cleanData,
                     perturbation: p, slopePerturbation: sp,
                     minSeasonLength: minSL, maxSeasonLength: maxSL,
-                slopeSymmetry: Double(settings.slopeSymmetry))
+                    slopeSymmetry: Double(settings.slopeSymmetry),
+                    bounds: dlBounds,
+                    secondPass: settings.enableSecondPass)
                 await MainActor.run {
                     dlBest = result.best
                     dlEnsemble = result.ensemble
                     dlSliders = result.best
-                    log.success("DL fit (excl. \(outlierIndices.count) outlier): RMSE=\(String(format: "%.4f", result.best.rmse)), \(result.ensemble.count) viable of 50")
+                    let rmseStr = String(format: "%.4f", result.best.rmse)
+                    if result.best.rmse > 0.15 {
+                        log.warn("DL fit poor (excl. \(outlierIndices.count) outlier): RMSE=\(rmseStr) — try adjusting SOS slider or widening parameter bounds")
+                    } else {
+                        log.success("DL fit (excl. \(outlierIndices.count) outlier): RMSE=\(rmseStr), \(result.ensemble.count) viable of 50")
+                    }
                 }
             } else {
                 await MainActor.run {
                     dlBest = initial.best
                     dlEnsemble = initial.ensemble
                     dlSliders = initial.best
-                    log.success("DL fit: RMSE=\(String(format: "%.4f", initial.best.rmse)), \(initial.ensemble.count) viable of 50, no outliers")
+                    let rmseStr = String(format: "%.4f", initial.best.rmse)
+                    if initial.best.rmse > 0.15 {
+                        log.warn("DL fit poor: RMSE=\(rmseStr) — try adjusting SOS slider or widening parameter bounds")
+                    } else {
+                        log.success("DL fit: RMSE=\(rmseStr), \(initial.ensemble.count) viable of 50, no outliers")
+                    }
                 }
             }
         }
@@ -1367,7 +1919,20 @@ struct ContentView: View {
             minObservations: settings.pixelMinObservations,
             minSeasonLength: Double(settings.minSeasonLength),
             maxSeasonLength: Double(settings.maxSeasonLength),
-            slopeSymmetry: Double(settings.slopeSymmetry)
+            slopeSymmetry: Double(settings.slopeSymmetry),
+            boundMnMin: settings.boundMnMin,
+            boundMnMax: settings.boundMnMax,
+            boundDeltaMin: settings.boundDeltaMin,
+            boundDeltaMax: settings.boundDeltaMax,
+            boundSosMin: settings.boundSosMin,
+            boundSosMax: settings.boundSosMax,
+            boundRspMin: settings.boundRspMin,
+            boundRspMax: settings.boundRspMax,
+            boundRauMin: settings.boundRauMin,
+            boundRauMax: settings.boundRauMax,
+            secondPass: settings.enableSecondPass,
+            secondPassWeightMin: settings.secondPassWeightMin,
+            secondPassWeightMax: settings.secondPassWeightMax
         )
 
         logDistributions(label: "Per-pixel DL fit", base: medianFit, p: settings.pixelPerturbation,
@@ -1375,13 +1940,15 @@ struct ContentView: View {
                          minSL: Double(settings.minSeasonLength), maxSL: Double(settings.maxSeasonLength))
 
         let enforceAOI = settings.enforceAOI
-        Task.detached {
+        let coverageThreshold = settings.pixelCoverageThreshold
+        pixelFitTask = Task.detached {
             let result = await PixelPhenologyFitter.fitAllPixels(
                 frames: frames,
                 medianParams: medianFit,
                 settings: fitSettings,
                 polygon: polygon,
                 enforceAOI: enforceAOI,
+                pixelCoverageThreshold: coverageThreshold,
                 onProgress: { progress in
                     Task { @MainActor in
                         pixelFitProgress = progress
@@ -1389,10 +1956,22 @@ struct ContentView: View {
                 }
             )
 
+            guard !Task.isCancelled else {
+                await MainActor.run {
+                    isRunningPixelFit = false
+                    log.info("Per-pixel fit cancelled")
+                }
+                return
+            }
+
             await MainActor.run {
-                pixelPhenology = result
+                pixelPhenologyBase = result
+                pixelPhenology = result.reclassified(rmseThreshold: settings.pixelFitRMSEThreshold)
                 isRunningPixelFit = false
-                log.success("Per-pixel fit: \(result.goodCount) good, \(result.poorCount) poor, \(result.skippedCount) skipped in \(String(format: "%.1f", result.computeTimeSeconds))s")
+                pixelFitTask = nil
+                lastPixelFitSettingsHash = pixelFitSettingsHash
+                let reclassified = pixelPhenology!
+                log.success("Per-pixel fit: \(reclassified.goodCount) good, \(reclassified.poorCount) poor, \(reclassified.skippedCount) skipped in \(String(format: "%.1f", result.computeTimeSeconds))s")
             }
         }
     }
@@ -1421,18 +2000,23 @@ struct ContentView: View {
         for (i, frame) in frames.enumerated() {
             let m = filteredMedians[i]
             guard !m.isNaN else { continue }
-            data.append(DoubleLogistic.DataPoint(doy: Double(frame.dayOfYear), ndvi: Double(m)))
+            data.append(DoubleLogistic.DataPoint(doy: Double(frame.continuousDOY(referenceYear: referenceYear)), ndvi: Double(m)))
         }
         guard data.count >= 4 else { return }
         let p = settings.pixelPerturbation
         let sp = settings.pixelSlopePerturbation
         let minSL = Double(settings.minSeasonLength)
         let maxSL = Double(settings.maxSeasonLength)
+        let dlBounds: (lo: [Double], hi: [Double]) = (
+            [settings.boundMnMin, settings.boundDeltaMin, settings.boundSosMin, settings.boundRspMin, max(minSL, 10), settings.boundRauMin],
+            [settings.boundMnMax, settings.boundDeltaMax, settings.boundSosMax, settings.boundRspMax, min(maxSL, 350), settings.boundRauMax]
+        )
         Task.detached {
             let result = DoubleLogistic.ensembleFit(data: data,
                 perturbation: p, slopePerturbation: sp,
                 minSeasonLength: minSL, maxSeasonLength: maxSL,
-                slopeSymmetry: Double(settings.slopeSymmetry))
+                slopeSymmetry: Double(settings.slopeSymmetry),
+                bounds: dlBounds)
             await MainActor.run {
                 dlBest = result.best
                 dlSliders = result.best
@@ -1450,19 +2034,25 @@ struct ContentView: View {
         log.info("Cluster filter removed, restored \(original.goodCount) good pixels")
 
         // Refit DL on original (unfiltered) median NDVI
-        let data = processor.frames.map { f in
-            DoubleLogistic.DataPoint(doy: Double(f.dayOfYear), ndvi: Double(f.medianNDVI))
+        let refYr = referenceYear
+        let data = processor.frames.filter { $0.validPixelCount > 0 }.map { f in
+            DoubleLogistic.DataPoint(doy: Double(f.continuousDOY(referenceYear: refYr)), ndvi: Double(f.medianNDVI))
         }
         guard data.count >= 4 else { return }
         let p = settings.pixelPerturbation
         let sp = settings.pixelSlopePerturbation
         let minSL = Double(settings.minSeasonLength)
         let maxSL = Double(settings.maxSeasonLength)
+        let dlBounds: (lo: [Double], hi: [Double]) = (
+            [settings.boundMnMin, settings.boundDeltaMin, settings.boundSosMin, settings.boundRspMin, max(minSL, 10), settings.boundRauMin],
+            [settings.boundMnMax, settings.boundDeltaMax, settings.boundSosMax, settings.boundRspMax, min(maxSL, 350), settings.boundRauMax]
+        )
         Task.detached {
             let result = DoubleLogistic.ensembleFit(data: data,
                 perturbation: p, slopePerturbation: sp,
                 minSeasonLength: minSL, maxSeasonLength: maxSL,
-                slopeSymmetry: Double(settings.slopeSymmetry))
+                slopeSymmetry: Double(settings.slopeSymmetry),
+                bounds: dlBounds)
             await MainActor.run {
                 dlBest = result.best
                 dlSliders = result.best
@@ -1473,18 +2063,24 @@ struct ContentView: View {
     }
 
     private func runDLFitFrom(_ start: DLParams) {
-        let data = processor.frames.map { f in
-            DoubleLogistic.DataPoint(doy: Double(f.dayOfYear), ndvi: Double(f.medianNDVI))
+        let refYr = referenceYear
+        let data = processor.frames.filter { $0.validPixelCount > 0 }.map { f in
+            DoubleLogistic.DataPoint(doy: Double(f.continuousDOY(referenceYear: refYr)), ndvi: Double(f.medianNDVI))
         }
         guard data.count >= 4 else { return }
         let p = settings.pixelPerturbation
         let sp = settings.pixelSlopePerturbation
         let minSL = Double(settings.minSeasonLength)
         let maxSL = Double(settings.maxSeasonLength)
+        let dlBounds: (lo: [Double], hi: [Double]) = (
+            [settings.boundMnMin, settings.boundDeltaMin, settings.boundSosMin, settings.boundRspMin, max(minSL, 10), settings.boundRauMin],
+            [settings.boundMnMax, settings.boundDeltaMax, settings.boundSosMax, settings.boundRspMax, min(maxSL, 350), settings.boundRauMax]
+        )
         Task.detached {
             let fitted = DoubleLogistic.fit(data: data, initial: start,
                                            minSeasonLength: minSL, maxSeasonLength: maxSL,
-                slopeSymmetry: Double(settings.slopeSymmetry))
+                slopeSymmetry: Double(settings.slopeSymmetry),
+                bounds: dlBounds)
             await MainActor.run {
                 dlBest = fitted
                 dlSliders = fitted
@@ -1492,7 +2088,8 @@ struct ContentView: View {
                 let result = DoubleLogistic.ensembleFit(data: data,
                     perturbation: p, slopePerturbation: sp,
                     minSeasonLength: minSL, maxSeasonLength: maxSL,
-                slopeSymmetry: Double(settings.slopeSymmetry))
+                    slopeSymmetry: Double(settings.slopeSymmetry),
+                    bounds: dlBounds)
                 dlEnsemble = result.ensemble
                 if result.best.rmse < fitted.rmse {
                     dlBest = result.best
@@ -1711,20 +2308,32 @@ struct ContentView: View {
         guard let geo = settings.aoiGeometry,
               let first = processor.frames.first else { return }
         let bbox = geo.bbox
-        let center = CLLocationCoordinate2D(latitude: (bbox.minLat + bbox.maxLat) / 2,
-                                            longitude: (bbox.minLon + bbox.maxLon) / 2)
-        let span = MKCoordinateSpan(latitudeDelta: bbox.maxLat - bbox.minLat,
-                                    longitudeDelta: bbox.maxLon - bbox.minLon)
+        // The S2 image chip is typically larger than the AOI bbox due to pixel
+        // alignment and the buffer added in NDVIProcessor. Scale the bbox to
+        // match the frame's aspect ratio so the basemap aligns with the imagery.
+        let aoiLatSpan = bbox.maxLat - bbox.minLat
+        let aoiLonSpan = bbox.maxLon - bbox.minLon
+        let frameAspect = Double(first.width) / Double(first.height)  // W/H in pixels
+        let centerLat = (bbox.minLat + bbox.maxLat) / 2
+        let centerLon = (bbox.minLon + bbox.maxLon) / 2
+
+        // Expand bbox to match frame aspect ratio (the chip is always larger)
+        // The processor adds ~10% buffer on each side, so add ~25% total padding
+        let padFactor = 1.25
+        let adjustedLatSpan = max(aoiLatSpan, aoiLonSpan / frameAspect) * padFactor
+        let adjustedLonSpan = max(aoiLonSpan, aoiLatSpan * frameAspect) * padFactor
+
+        let center = CLLocationCoordinate2D(latitude: centerLat, longitude: centerLon)
+        let span = MKCoordinateSpan(latitudeDelta: adjustedLatSpan, longitudeDelta: adjustedLonSpan)
         let region = MKCoordinateRegion(center: center, span: span)
 
         let opts = MKMapSnapshotter.Options()
         opts.mapType = .satellite
         opts.region = region
-        // Match the S2 frame pixel dimensions * scale for crisp rendering
-        let targetW = CGFloat(first.width) * 8  // use main display scale
+        let targetW = CGFloat(first.width) * 8
         let targetH = CGFloat(first.height) * 8
         opts.size = CGSize(width: targetW, height: targetH)
-        opts.scale = 1  // we manage resolution ourselves
+        opts.scale = 1
 
         let snapshotter = MKMapSnapshotter(options: opts)
         snapshotter.start { snapshot, error in
@@ -1880,6 +2489,12 @@ struct LogView: View {
     @State private var log = ActivityLog.shared
     @State private var settings = AppSettings.shared
     @State private var showingImages = false
+    enum PreviewMode: String, CaseIterable {
+        case masked = "Masked"
+        case raw = "Raw"
+        case scl = "SCL"
+    }
+    @State private var previewMode: PreviewMode = .masked
     @State private var searchTrigger = 0
     var processor: NDVIProcessor
 
@@ -1926,7 +2541,27 @@ struct LogView: View {
                 }
                 ToolbarItem(placement: .topBarTrailing) {
                     HStack(spacing: 8) {
-                        if !showingImages {
+                        if showingImages {
+                            Menu {
+                                ForEach(PreviewMode.allCases, id: \.self) { mode in
+                                    Button {
+                                        withAnimation { previewMode = mode }
+                                    } label: {
+                                        if previewMode == mode {
+                                            Label(mode.rawValue, systemImage: "checkmark")
+                                        } else {
+                                            Text(mode.rawValue)
+                                        }
+                                    }
+                                }
+                            } label: {
+                                Label(previewMode.rawValue,
+                                      systemImage: previewMode == .scl ? "square.grid.3x3" :
+                                                   previewMode == .raw ? "eye" : "eye.slash")
+                            }
+                            .buttonStyle(.glass)
+                            .tint(previewMode == .masked ? .secondary : .orange)
+                        } else {
                             Button {
                                 searchTrigger += 1
                             } label: {
@@ -1951,7 +2586,10 @@ struct LogView: View {
     private var imageGrid: some View {
         ScrollView {
             VStack(spacing: 8) {
-                if settings.displayMode == .ndvi {
+                if previewMode == .scl {
+                    SCLLegend()
+                        .padding(.horizontal, 8)
+                } else if settings.displayMode == .ndvi {
                     NDVIColorBar()
                         .padding(.horizontal, 8)
                 } else if settings.displayMode == .scl {
@@ -1961,18 +2599,50 @@ struct LogView: View {
                 LazyVGrid(columns: gridColumns, spacing: 8) {
                     ForEach(processor.frames.sorted(by: { $0.date < $1.date })) { frame in
                         VStack(spacing: 2) {
-                            NDVIMapView(frame: frame, scale: 2, showPolygon: true,
-                                        showColorBar: false, displayMode: settings.displayMode,
-                                        cloudMask: settings.cloudMask,
-                                        ndviThreshold: settings.ndviThreshold,
-                                        sclValidClasses: settings.sclValidClasses,
-                                        showSCLBoundaries: settings.showSCLBoundaries,
-                                        enforceAOI: settings.enforceAOI,
-                                        showMaskedClassColors: settings.showMaskedClassColors)
-                                .clipShape(RoundedRectangle(cornerRadius: 4))
+                            ZStack(alignment: .topLeading) {
+                                NDVIMapView(frame: frame, scale: 2, showPolygon: true,
+                                            showColorBar: false,
+                                            displayMode: previewMode == .scl ? .scl : settings.displayMode,
+                                            cloudMask: (previewMode != .masked || frame.validPixelCount == 0) ? false : settings.cloudMask,
+                                            ndviThreshold: previewMode != .masked ? -1 : settings.ndviThreshold,
+                                            sclValidClasses: previewMode != .masked ? Set(0...11) : settings.sclValidClasses,
+                                            showSCLBoundaries: previewMode != .masked ? false : settings.showSCLBoundaries,
+                                            enforceAOI: previewMode != .masked ? false : settings.enforceAOI,
+                                            showMaskedClassColors: (previewMode != .masked || frame.validPixelCount == 0) ? true : settings.showMaskedClassColors)
+                                    .clipShape(RoundedRectangle(cornerRadius: 4))
+                                // Source label
+                                if let sid = frame.sourceID {
+                                    Text(sid.shortLabel)
+                                        .font(.system(size: 6, weight: .bold))
+                                        .foregroundStyle(.white)
+                                        .padding(.horizontal, 2)
+                                        .padding(.vertical, 1)
+                                        .background(Color.black.opacity(0.5))
+                                        .cornerRadius(2)
+                                        .padding(2)
+                                }
+                                if frame.validPixelCount == 0 {
+                                    VStack {
+                                        Spacer()
+                                        HStack {
+                                            Spacer()
+                                            Text("NO DATA")
+                                                .font(.system(size: 6, weight: .bold))
+                                                .foregroundStyle(.white)
+                                                .padding(.horizontal, 2)
+                                                .padding(.vertical, 1)
+                                                .background(Color.red.opacity(0.8))
+                                                .cornerRadius(2)
+                                                .padding(2)
+                                        }
+                                    }
+                                    RoundedRectangle(cornerRadius: 4)
+                                        .stroke(Color.red, lineWidth: 1.5)
+                                }
+                            }
                             Text(frame.dateString)
                                 .font(.system(size: 8))
-                                .foregroundStyle(.secondary)
+                                .foregroundStyle(frame.validPixelCount == 0 ? .red : .secondary)
                         }
                     }
                 }

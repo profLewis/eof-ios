@@ -492,34 +492,69 @@ actor COGReader {
     // MARK: - Decompression
 
     private func decompressTileU16(data: Data, ifd: IFDInfo) throws -> [UInt16] {
-        let bytesPerPixel = max(1, ifd.bitsPerSample / 8)
-        let expectedSize = ifd.tileWidth * ifd.tileLength * bytesPerPixel
+        let bps = ifd.bitsPerSample
+        let totalPixels = ifd.tileWidth * ifd.tileLength
+        let isBitPacked = bps > 8 && bps < 16  // e.g. NBITS=15
+
+        // Expected decompressed size depends on packing
+        let expectedSize: Int
+        if isBitPacked {
+            expectedSize = (totalPixels * bps + 7) / 8
+        } else {
+            let bytesPerPixel = max(1, bps / 8)
+            expectedSize = totalPixels * bytesPerPixel
+        }
 
         var raw = try decompressBytes(data: data, compression: ifd.compression, expectedSize: expectedSize)
 
-        // Apply horizontal differencing predictor (TIFF predictor = 2)
-        if ifd.predictor == 2 {
-            if bytesPerPixel == 2 {
-                applyHorizontalDiffPredictor16(&raw, width: ifd.tileWidth, height: ifd.tileLength)
-            } else if bytesPerPixel == 1 {
-                applyHorizontalDiffPredictor8(&raw, width: ifd.tileWidth, height: ifd.tileLength)
-            }
-        }
-
+        let totalPixelCount = ifd.tileWidth * ifd.tileLength
         var pixels = [UInt16]()
-        pixels.reserveCapacity(ifd.tileWidth * ifd.tileLength)
+        pixels.reserveCapacity(totalPixelCount)
 
-        if bytesPerPixel <= 1 {
-            // 8-bit data (e.g. SCL band): read each byte as a UInt16
-            for i in 0..<min(raw.count, expectedSize) {
-                pixels.append(UInt16(raw[i]))
+        if isBitPacked {
+            // Bit-packed data: extract N-bit values from byte stream (big-endian bit order per TIFF spec)
+            var bitPos = 0
+            let mask = UInt32((1 << bps) - 1)
+            for _ in 0..<totalPixelCount {
+                let byteIdx = bitPos / 8
+                let bitOff = bitPos % 8
+                // Read up to 4 bytes starting at byteIdx
+                var accum: UInt32 = 0
+                let bytesNeeded = (bitOff + bps + 7) / 8
+                for b in 0..<bytesNeeded {
+                    if byteIdx + b < raw.count {
+                        accum = (accum << 8) | UInt32(raw[byteIdx + b])
+                    }
+                }
+                // Shift right to align the value, then mask
+                let shift = bytesNeeded * 8 - bitOff - bps
+                let val = UInt16((accum >> shift) & mask)
+                pixels.append(val)
+                bitPos += bps
             }
         } else {
-            // 16-bit data: read pairs of bytes as little-endian UInt16
-            for i in stride(from: 0, to: min(raw.count, expectedSize), by: 2) {
-                if i + 1 < raw.count {
-                    let val = UInt16(raw[i]) | (UInt16(raw[i + 1]) << 8)
-                    pixels.append(val)
+            // Apply horizontal differencing predictor (TIFF predictor = 2)
+            let bytesPerPixel = max(1, bps / 8)
+            if ifd.predictor == 2 {
+                if bytesPerPixel == 2 {
+                    applyHorizontalDiffPredictor16(&raw, width: ifd.tileWidth, height: ifd.tileLength)
+                } else if bytesPerPixel == 1 {
+                    applyHorizontalDiffPredictor8(&raw, width: ifd.tileWidth, height: ifd.tileLength)
+                }
+            }
+
+            if bytesPerPixel <= 1 {
+                // 8-bit data (e.g. SCL band): read each byte as a UInt16
+                for i in 0..<min(raw.count, expectedSize) {
+                    pixels.append(UInt16(raw[i]))
+                }
+            } else {
+                // 16-bit data: read pairs of bytes as little-endian UInt16
+                for i in stride(from: 0, to: min(raw.count, expectedSize), by: 2) {
+                    if i + 1 < raw.count {
+                        let val = UInt16(raw[i]) | (UInt16(raw[i + 1]) << 8)
+                        pixels.append(val)
+                    }
                 }
             }
         }
@@ -637,6 +672,7 @@ enum COGError: Error, LocalizedError {
     case decompressionFailed
     case httpError(Int)
     case missingTransform
+    case bandDataEmpty(String)
 
     var errorDescription: String? {
         switch self {
@@ -645,6 +681,7 @@ enum COGError: Error, LocalizedError {
         case .decompressionFailed: return "DEFLATE decompression failed"
         case .httpError(let code): return "HTTP error \(code)"
         case .missingTransform: return "Missing proj:transform (no STAC metadata or COG header)"
+        case .bandDataEmpty(let msg): return "Band data empty: \(msg)"
         }
     }
 }

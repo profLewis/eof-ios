@@ -2,6 +2,22 @@ import SwiftUI
 import MapKit
 import UniformTypeIdentifiers
 
+// MARK: - Drawing Mode
+
+enum AOIDrawMode: String, CaseIterable {
+    case view = "View"
+    case polygon = "Polygon"
+    case rectangle = "Rectangle"
+
+    var icon: String {
+        switch self {
+        case .view: return "hand.point.up"
+        case .polygon: return "pentagon"
+        case .rectangle: return "rectangle.dashed"
+        }
+    }
+}
+
 struct AOIView: View {
     @Binding var isPresented: Bool
     @State private var settings = AppSettings.shared
@@ -9,9 +25,19 @@ struct AOIView: View {
 
     // Map state
     @State private var cameraPosition: MapCameraPosition = .automatic
-    @State private var isDrawing = false
-    @State private var drawStart: CLLocationCoordinate2D?
-    @State private var drawEnd: CLLocationCoordinate2D?
+    @State private var drawMode: AOIDrawMode = .view
+
+    // Rectangle drawing
+    @State private var rectStart: CLLocationCoordinate2D?
+    @State private var rectEnd: CLLocationCoordinate2D?
+
+    // Polygon digitizing
+    @State private var drawingVertices: [CLLocationCoordinate2D] = []
+
+    // Vertex editing
+    @State private var editVertices: [CLLocationCoordinate2D] = []
+    @State private var selectedVertexIndex: Int? = nil
+    @State private var dragOriginal: CLLocationCoordinate2D? = nil
 
     // Search
     @State private var searchText = ""
@@ -21,6 +47,9 @@ struct AOIView: View {
     // Location
     @State private var locationService = LocationService()
     @State private var locationDiameter: Double = 500
+
+    // Crop map random field
+    @State private var selectedCropMap: CropMapSource = .global
 
     // Import sheet
     @State private var showingImport = false
@@ -32,13 +61,8 @@ struct AOIView: View {
     var body: some View {
         NavigationStack {
             VStack(spacing: 0) {
-                // Search bar
                 searchBar
-
-                // Map
                 mapView
-
-                // Bottom controls
                 bottomControls
             }
             .navigationTitle("Area of Interest")
@@ -53,12 +77,15 @@ struct AOIView: View {
                 importSheet
             }
             .onAppear {
-                // Center map on current AOI if set
                 if let geo = settings.aoiGeometry {
+                    loadEditVertices(from: geo)
                     let c = geo.centroid
+                    let b = geo.bbox
+                    let latSpan = (b.maxLat - b.minLat) * 2.0
+                    let lonSpan = (b.maxLon - b.minLon) * 2.0
                     cameraPosition = .region(MKCoordinateRegion(
                         center: CLLocationCoordinate2D(latitude: c.lat, longitude: c.lon),
-                        latitudinalMeters: 2000, longitudinalMeters: 2000
+                        span: MKCoordinateSpan(latitudeDelta: max(0.005, latSpan), longitudeDelta: max(0.005, lonSpan))
                     ))
                 }
             }
@@ -90,7 +117,6 @@ struct AOIView: View {
             .padding(.vertical, 8)
             .background(.ultraThinMaterial)
 
-            // Search results dropdown
             if showingSearchResults && !searchService.results.isEmpty {
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 0) {
@@ -126,49 +152,180 @@ struct AOIView: View {
 
     private var mapView: some View {
         MapReader { proxy in
-            Map(position: $cameraPosition, interactionModes: isDrawing ? [] : .all) {
-                // Current AOI polygon
-                if let geo = settings.aoiGeometry {
-                    let coords = geo.polygon.map { CLLocationCoordinate2D(latitude: $0.lat, longitude: $0.lon) }
-                    MapPolygon(coordinates: coords)
+            Map(position: $cameraPosition, interactionModes: drawMode == .rectangle ? [] : .all) {
+                // Current AOI polygon (green) — only in view mode with edit vertices
+                if drawMode == .view, editVertices.count >= 3 {
+                    MapPolygon(coordinates: editVertices)
                         .foregroundStyle(.green.opacity(0.15))
                         .stroke(.green, lineWidth: 2)
+                } else if drawMode != .view, let geo = settings.aoiGeometry {
+                    // Show existing AOI while drawing
+                    let coords = geo.polygon.map { CLLocationCoordinate2D(latitude: $0.lat, longitude: $0.lon) }
+                    MapPolygon(coordinates: coords)
+                        .foregroundStyle(.green.opacity(0.1))
+                        .stroke(.green.opacity(0.5), lineWidth: 1)
                 }
 
-                // Drawing rectangle preview
-                if let s = drawStart, let e = drawEnd {
+                // Drawing preview: polygon vertices
+                if drawMode == .polygon {
+                    // Lines between vertices
+                    if drawingVertices.count >= 2 {
+                        MapPolyline(coordinates: drawingVertices)
+                            .stroke(.blue, lineWidth: 2)
+                    }
+                    // Vertex dots
+                    ForEach(Array(drawingVertices.enumerated()), id: \.offset) { i, coord in
+                        Annotation("", coordinate: coord) {
+                            Circle()
+                                .fill(i == 0 && drawingVertices.count >= 3 ? .yellow : .blue)
+                                .frame(width: 14, height: 14)
+                                .overlay(Circle().stroke(.white, lineWidth: 2))
+                        }
+                    }
+                }
+
+                // Drawing preview: rectangle
+                if drawMode == .rectangle, let s = rectStart, let e = rectEnd {
                     let corners = rectCorners(s, e)
                     MapPolygon(coordinates: corners)
                         .foregroundStyle(.blue.opacity(0.15))
                         .stroke(.blue, lineWidth: 2)
                 }
+
+                // Vertex handles (view mode editing)
+                if drawMode == .view, editVertices.count >= 3 {
+                    // Main vertices
+                    ForEach(Array(editVertices.enumerated()), id: \.offset) { i, coord in
+                        Annotation("", coordinate: coord) {
+                            vertexHandle(index: i)
+                        }
+                    }
+                    // Midpoint handles for inserting vertices
+                    ForEach(0..<editVertices.count, id: \.self) { i in
+                        let next = (i + 1) % editVertices.count
+                        let mid = CLLocationCoordinate2D(
+                            latitude: (editVertices[i].latitude + editVertices[next].latitude) / 2,
+                            longitude: (editVertices[i].longitude + editVertices[next].longitude) / 2
+                        )
+                        Annotation("", coordinate: mid) {
+                            midpointHandle(insertAfter: i)
+                        }
+                    }
+                }
             }
             .mapStyle(.hybrid(elevation: .flat))
-            .gesture(
-                isDrawing ?
-                DragGesture(minimumDistance: 5)
-                    .onChanged { value in
-                        drawStart = proxy.convert(value.startLocation, from: .local)
-                        drawEnd = proxy.convert(value.location, from: .local)
-                    }
-                    .onEnded { _ in
-                        if let s = drawStart, let e = drawEnd {
-                            applyDrawnRect(start: s, end: e)
-                        }
-                        drawStart = nil
-                        drawEnd = nil
-                        isDrawing = false
-                    }
-                : nil
-            )
-            .overlay(alignment: .topTrailing) {
-                if isDrawing {
-                    Text("Drag to draw rectangle")
-                        .font(.caption.bold())
-                        .padding(8)
-                        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 8))
-                        .padding(8)
+            .overlay {
+                mapGestureOverlay(proxy: proxy)
+            }
+            .overlay(alignment: .top) {
+                modeOverlay
+            }
+        }
+    }
+
+    // MARK: - Vertex Handle
+
+    private func vertexHandle(index: Int) -> some View {
+        Circle()
+            .fill(selectedVertexIndex == index ? .yellow : .white)
+            .frame(width: 22, height: 22)
+            .overlay(Circle().stroke(.green, lineWidth: 2.5))
+            .shadow(radius: 2)
+            .onTapGesture {
+                if selectedVertexIndex == index {
+                    selectedVertexIndex = nil
+                } else {
+                    selectedVertexIndex = index
                 }
+            }
+    }
+
+    private func midpointHandle(insertAfter index: Int) -> some View {
+        Circle()
+            .fill(.white.opacity(0.6))
+            .frame(width: 12, height: 12)
+            .overlay(Circle().stroke(.green.opacity(0.5), lineWidth: 1.5))
+            .onTapGesture {
+                let next = (index + 1) % editVertices.count
+                let mid = CLLocationCoordinate2D(
+                    latitude: (editVertices[index].latitude + editVertices[next].latitude) / 2,
+                    longitude: (editVertices[index].longitude + editVertices[next].longitude) / 2
+                )
+                editVertices.insert(mid, at: next)
+                selectedVertexIndex = next
+                applyEditVertices()
+            }
+    }
+
+    // MARK: - Map Gesture
+
+    @ViewBuilder
+    private func mapGestureOverlay(proxy: MapProxy) -> some View {
+        if drawMode == .polygon {
+            Color.clear.contentShape(Rectangle())
+                .onTapGesture { location in
+                    if let coord = proxy.convert(location, from: .local) {
+                        handleMapTap(coord)
+                    }
+                }
+        } else if drawMode == .rectangle {
+            Color.clear.contentShape(Rectangle())
+                .gesture(
+                    DragGesture(minimumDistance: 5)
+                        .onChanged { value in
+                            rectStart = proxy.convert(value.startLocation, from: .local)
+                            rectEnd = proxy.convert(value.location, from: .local)
+                        }
+                        .onEnded { _ in
+                            if let s = rectStart, let e = rectEnd {
+                                applyDrawnRect(start: s, end: e)
+                            }
+                            rectStart = nil
+                            rectEnd = nil
+                            drawMode = .view
+                        }
+                )
+        }
+    }
+
+    private func handleMapTap(_ coord: CLLocationCoordinate2D) {
+        guard drawMode == .polygon else { return }
+        clearMessages()
+
+        // Check if tapping near first vertex to close polygon
+        if drawingVertices.count >= 3 {
+            let first = drawingVertices[0]
+            let dist = hypot(coord.latitude - first.latitude, coord.longitude - first.longitude)
+            if dist < 0.0005 { // ~50m at mid latitudes
+                closePolygon()
+                return
+            }
+        }
+
+        drawingVertices.append(coord)
+    }
+
+    // MARK: - Mode Overlay
+
+    private var modeOverlay: some View {
+        Group {
+            switch drawMode {
+            case .polygon:
+                Text(drawingVertices.isEmpty ? "Tap to add vertices" :
+                     drawingVertices.count < 3 ? "Tap to add more vertices (\(drawingVertices.count)/3 min)" :
+                     "Tap to add, or tap first vertex to close")
+                    .font(.caption.bold())
+                    .padding(8)
+                    .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 8))
+                    .padding(8)
+            case .rectangle:
+                Text("Drag to draw rectangle")
+                    .font(.caption.bold())
+                    .padding(8)
+                    .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 8))
+                    .padding(8)
+            case .view:
+                EmptyView()
             }
         }
     }
@@ -176,7 +333,7 @@ struct AOIView: View {
     // MARK: - Bottom Controls
 
     private var bottomControls: some View {
-        VStack(spacing: 8) {
+        VStack(spacing: 6) {
             // Messages
             if let err = errorMessage {
                 Label(err, systemImage: "exclamationmark.triangle.fill")
@@ -189,56 +346,148 @@ struct AOIView: View {
                     .foregroundStyle(.green)
             }
 
-            // Current AOI summary
+            // AOI summary
             if let geo = settings.aoiGeometry {
                 let c = geo.centroid
-                Text("\(settings.aoiSourceLabel) \u{2022} \(String(format: "%.4f, %.4f", c.lat, c.lon)) \u{2022} \(geo.polygon.count) vertices")
+                Text("\(settings.aoiSourceLabel) \u{2022} \(String(format: "%.4f, %.4f", c.lat, c.lon)) \u{2022} \(editVertices.count)v")
                     .font(.system(size: 9).monospacedDigit())
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
             }
 
-            // Action buttons
-            HStack(spacing: 12) {
-                Button {
-                    isDrawing.toggle()
-                    if isDrawing {
-                        drawStart = nil
-                        drawEnd = nil
+            // Mode selector
+            Picker("Mode", selection: $drawMode) {
+                ForEach(AOIDrawMode.allCases, id: \.self) { mode in
+                    Label(mode.rawValue, systemImage: mode.icon).tag(mode)
+                }
+            }
+            .pickerStyle(.segmented)
+            .onChange(of: drawMode) {
+                selectedVertexIndex = nil
+                if drawMode == .polygon {
+                    drawingVertices = []
+                }
+                if drawMode == .rectangle {
+                    rectStart = nil
+                    rectEnd = nil
+                }
+                if drawMode == .view, let geo = settings.aoiGeometry {
+                    loadEditVertices(from: geo)
+                }
+            }
+
+            // Action buttons row
+            HStack(spacing: 8) {
+                // Close polygon (only in polygon mode with ≥3 vertices)
+                if drawMode == .polygon && drawingVertices.count >= 3 {
+                    Button {
+                        closePolygon()
+                    } label: {
+                        Label("Close", systemImage: "checkmark.circle")
+                            .font(.caption)
                     }
-                } label: {
-                    Label(isDrawing ? "Cancel" : "Draw", systemImage: isDrawing ? "xmark" : "rectangle.dashed")
-                        .font(.caption)
+                    .buttonStyle(.borderedProminent)
+                    .tint(.blue)
                 }
-                .buttonStyle(.glass)
 
-                Button {
-                    requestMyLocation()
-                } label: {
-                    Label("My Location", systemImage: "location.fill")
-                        .font(.caption)
+                // Undo vertex (polygon mode)
+                if drawMode == .polygon && !drawingVertices.isEmpty {
+                    Button {
+                        drawingVertices.removeLast()
+                    } label: {
+                        Label("Undo", systemImage: "arrow.uturn.backward")
+                            .font(.caption)
+                    }
+                    .buttonStyle(.bordered)
                 }
-                .buttonStyle(.glass)
 
-                // Diameter stepper for location
-                HStack(spacing: 4) {
-                    Text("\(Int(locationDiameter))m")
-                        .font(.system(size: 10).monospacedDigit())
-                        .foregroundStyle(.secondary)
-                    Stepper("", value: $locationDiameter, in: 100...10000, step: 100)
-                        .labelsHidden()
-                        .scaleEffect(0.8)
+                // Delete vertex (view mode with selection)
+                if drawMode == .view, let idx = selectedVertexIndex, editVertices.count > 3 {
+                    Button {
+                        editVertices.remove(at: idx)
+                        selectedVertexIndex = nil
+                        applyEditVertices()
+                    } label: {
+                        Label("Delete Vertex", systemImage: "trash")
+                            .font(.caption)
+                    }
+                    .buttonStyle(.bordered)
+                    .tint(.red)
                 }
 
                 Spacer()
 
+                // My Location
+                Button {
+                    requestMyLocation()
+                } label: {
+                    Image(systemName: "location.fill")
+                        .font(.caption)
+                }
+                .buttonStyle(.bordered)
+
+                // Import
                 Button {
                     showingImport = true
                 } label: {
-                    Label("Import", systemImage: "square.and.arrow.down")
+                    Image(systemName: "square.and.arrow.down")
                         .font(.caption)
                 }
-                .buttonStyle(.glass)
+                .buttonStyle(.bordered)
+
+                // Clear AOI
+                if settings.aoiGeometry != nil {
+                    Button {
+                        settings.aoiGeometry = nil
+                        editVertices = []
+                        drawingVertices = []
+                        selectedVertexIndex = nil
+                        clearMessages()
+                        successMessage = "AOI cleared"
+                    } label: {
+                        Image(systemName: "trash")
+                            .font(.caption)
+                    }
+                    .buttonStyle(.bordered)
+                    .tint(.red)
+                }
+            }
+
+            // Location diameter (compact)
+            HStack(spacing: 4) {
+                Text("Location \u{00F8}:")
+                    .font(.system(size: 9))
+                    .foregroundStyle(.secondary)
+                Text("\(Int(locationDiameter))m")
+                    .font(.system(size: 10).monospacedDigit())
+                    .foregroundStyle(.secondary)
+                Stepper("", value: $locationDiameter, in: 100...10000, step: 100)
+                    .labelsHidden()
+                    .scaleEffect(0.8)
+                    .fixedSize()
+                Spacer()
+            }
+
+            // Random crop field
+            HStack(spacing: 6) {
+                Picker("Crop Map", selection: $selectedCropMap) {
+                    ForEach(CropMapSource.allCases) { source in
+                        Text(source.rawValue).tag(source)
+                    }
+                }
+                .pickerStyle(.menu)
+                .font(.caption)
+                .fixedSize()
+
+                Button {
+                    pickRandomField()
+                } label: {
+                    Label("Random Field", systemImage: "dice")
+                        .font(.caption)
+                }
+                .buttonStyle(.bordered)
+
+                Spacer()
             }
 
             // Recent AOIs
@@ -248,6 +497,9 @@ struct AOIView: View {
                         ForEach(settings.aoiHistory) { entry in
                             Button {
                                 settings.restoreAOI(entry)
+                                if let geo = settings.aoiGeometry {
+                                    loadEditVertices(from: geo)
+                                }
                                 clearMessages()
                                 successMessage = "Restored: \(entry.label)"
                                 flyToAOI()
@@ -280,6 +532,7 @@ struct AOIView: View {
                     settings.aoiSource = source
                     settings.aoiGeometry = geometry
                     settings.recordAOI()
+                    loadEditVertices(from: geometry)
                     clearMessages()
                     successMessage = label
                     flyToAOI()
@@ -294,6 +547,36 @@ struct AOIView: View {
     private func clearMessages() {
         errorMessage = nil
         successMessage = nil
+    }
+
+    private func loadEditVertices(from geo: GeoJSONGeometry) {
+        var verts = geo.polygon.map { CLLocationCoordinate2D(latitude: $0.lat, longitude: $0.lon) }
+        // Remove closing vertex if it duplicates the first
+        if verts.count > 1, let first = verts.first, let last = verts.last,
+           abs(first.latitude - last.latitude) < 1e-10,
+           abs(first.longitude - last.longitude) < 1e-10 {
+            verts.removeLast()
+        }
+        editVertices = verts
+    }
+
+    private func applyEditVertices() {
+        guard editVertices.count >= 3 else { return }
+        let verts = editVertices.map { (lat: $0.latitude, lon: $0.longitude) }
+        let geometry = AOIGeometry.fromVertices(verts)
+        settings.aoiSource = .digitized
+        settings.aoiGeometry = geometry
+        settings.recordAOI()
+    }
+
+    private func closePolygon() {
+        guard drawingVertices.count >= 3 else { return }
+        editVertices = drawingVertices
+        drawingVertices = []
+        applyEditVertices()
+        drawMode = .view
+        clearMessages()
+        successMessage = "Polygon created (\(editVertices.count) vertices)"
     }
 
     private func selectSearchResult(_ result: MKLocalSearchCompletion) {
@@ -330,7 +613,7 @@ struct AOIView: View {
         let maxLon = max(start.longitude, end.longitude)
 
         guard maxLat - minLat > 0.0001 && maxLon - minLon > 0.0001 else {
-            errorMessage = "Rectangle too small — drag further"
+            errorMessage = "Rectangle too small \u{2014} drag further"
             return
         }
 
@@ -338,15 +621,15 @@ struct AOIView: View {
         settings.aoiSource = .mapRect(minLat: minLat, minLon: minLon, maxLat: maxLat, maxLon: maxLon)
         settings.aoiGeometry = geometry
         settings.recordAOI()
+        loadEditVertices(from: geometry)
         clearMessages()
-        successMessage = "Map rectangle applied (\(geometry.polygon.count) vertices)"
+        successMessage = "Rectangle applied"
         log.info("AOI: map rect \(String(format: "%.4f", minLat))-\(String(format: "%.4f", maxLat)), \(String(format: "%.4f", minLon))-\(String(format: "%.4f", maxLon))")
     }
 
     private func requestMyLocation() {
         clearMessages()
         locationService.requestLocation()
-        // Watch for location updates
         Task {
             for _ in 0..<20 {
                 try? await Task.sleep(for: .milliseconds(250))
@@ -358,6 +641,7 @@ struct AOIView: View {
                     settings.aoiSource = .location(lat: coord.latitude, lon: coord.longitude, diameter: locationDiameter)
                     settings.aoiGeometry = geometry
                     settings.recordAOI()
+                    loadEditVertices(from: geometry)
                     successMessage = "My location: \(String(format: "%.4f, %.4f", coord.latitude, coord.longitude))"
                     log.info("AOI: my location \(String(format: "%.4f, %.4f", coord.latitude, coord.longitude)), \(Int(locationDiameter))m")
                     cameraPosition = .region(MKCoordinateRegion(
@@ -371,8 +655,38 @@ struct AOIView: View {
                     return
                 }
             }
-            errorMessage = "Location timeout — try again"
+            errorMessage = "Location timeout \u{2014} try again"
         }
+    }
+
+    private func pickRandomField() {
+        let sample = selectedCropMap.randomField()
+        let geometry = AOIGeometry.generate(
+            lat: sample.lat, lon: sample.lon,
+            diameter: 800, shape: .square
+        )
+        settings.aoiSource = .cropSample(crop: sample.crop, region: sample.region)
+        settings.aoiGeometry = geometry
+        settings.recordAOI()
+        loadEditVertices(from: geometry)
+
+        // Set date range to cover the growing season
+        let dates = CropMapSource.dateRange(plantingMonth: sample.plantingMonth, harvestMonth: sample.harvestMonth)
+        settings.startDate = dates.start
+        settings.endDate = dates.end
+
+        let monthNames = Calendar.current.shortMonthSymbols
+        let startM = monthNames[sample.plantingMonth - 1]
+        let endM = monthNames[sample.harvestMonth - 1]
+        clearMessages()
+        successMessage = "\(sample.crop) \u{2014} \(sample.region) (\(startM)\u{2013}\(endM))"
+        drawMode = .view
+
+        // Fly to location
+        cameraPosition = .region(MKCoordinateRegion(
+            center: CLLocationCoordinate2D(latitude: sample.lat, longitude: sample.lon),
+            span: MKCoordinateSpan(latitudeDelta: 0.02, longitudeDelta: 0.02)
+        ))
     }
 
     private func flyToAOI() {

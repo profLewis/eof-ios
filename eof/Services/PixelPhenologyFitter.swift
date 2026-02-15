@@ -10,6 +10,7 @@ enum PixelPhenologyFitter {
         settings: PhenologyFitSettings,
         polygon: [(x: Double, y: Double)],
         enforceAOI: Bool = true,
+        pixelCoverageThreshold: Double = 0.01,
         onProgress: @Sendable @escaping (Double) -> Void
     ) async -> PixelPhenologyResult {
         let t0 = CFAbsoluteTimeGetCurrent()
@@ -19,8 +20,12 @@ enum PixelPhenologyFitter {
         }
         let width = first.width
         let height = first.height
-        let doys = frames.map { Double($0.dayOfYear) }
+        // Use continuous DOY to handle year-boundary data
+        let refYear = Calendar.current.component(.year, from: first.date)
+        let doys = frames.map { Double($0.continuousDOY(referenceYear: refYear)) }
         let poly = polygon.map { (col: $0.x, row: $0.y) }
+        // Scale normalized polygon to pixel coordinates for coverage check
+        let polyPx = poly.map { (col: $0.col * Double(width), row: $0.row * Double(height)) }
 
         // Pre-extract per-pixel time series (serial, once)
         struct PixelWork: Sendable {
@@ -32,11 +37,13 @@ enum PixelPhenologyFitter {
         var workItems = [PixelWork]()
         for row in 0..<height {
             for col in 0..<width {
-                // Check polygon containment (normalized coords) — skip if enforceAOI is off
+                // Check polygon containment — skip if enforceAOI is off
                 if enforceAOI {
-                    let x = (Double(col) + 0.5) / Double(width)
-                    let y = (Double(row) + 0.5) / Double(height)
-                    guard NDVIProcessor.pointInPolygon(x: x, y: y, polygon: poly) else { continue }
+                    guard NDVIProcessor.pixelInAOI(
+                        col: col, row: row,
+                        polygon: polyPx,
+                        threshold: pixelCoverageThreshold
+                    ) else { continue }
                 }
 
                 // Extract time series for this pixel

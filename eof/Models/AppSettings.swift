@@ -26,6 +26,8 @@ class AppSettings {
         case manual(lat: Double, lon: Double, diameter: Double, shape: ManualShape)
         case mapRect(minLat: Double, minLon: Double, maxLat: Double, maxLon: Double)
         case location(lat: Double, lon: Double, diameter: Double)
+        case digitized
+        case cropSample(crop: String, region: String)
     }
 
     enum ManualShape: String, CaseIterable {
@@ -63,7 +65,7 @@ class AppSettings {
     // Per-pixel phenology settings
     var pixelEnsembleRuns: Int = 5 { didSet { save() } }
     var pixelPerturbation: Double = 0.50 { didSet { save() } }
-    var pixelFitRMSEThreshold: Double = 0.10 { didSet { save() } }
+    var pixelFitRMSEThreshold: Double = 0.15 { didSet { save() } }
     var pixelMinObservations: Int = 4 { didSet { save() } }
     var pixelSlopePerturbation: Double = 0.10 { didSet { save() } }
     var clusterFilterThreshold: Double = 4.0 { didSet { save() } }
@@ -71,6 +73,32 @@ class AppSettings {
     var maxSeasonLength: Int = 150 { didSet { save() } }
     /// Max % difference between green-up (rsp) and senescence (rau) rates. 0 = no constraint.
     var slopeSymmetry: Int = 20 { didSet { save() } }
+    /// Second pass: refit with weights from first-pass DL curve.
+    var enableSecondPass: Bool = false { didSet { save() } }
+    /// Second pass weight range: min weight (off-season) and max weight (peak season).
+    var secondPassWeightMin: Double = 1.0 { didSet { save() } }
+    var secondPassWeightMax: Double = 2.0 { didSet { save() } }
+
+    // DL parameter bounds (physical constraints)
+    var boundMnMin: Double = -0.5 { didSet { save() } }
+    var boundMnMax: Double = 0.8 { didSet { save() } }
+    var boundDeltaMin: Double = 0.05 { didSet { save() } }
+    var boundDeltaMax: Double = 1.5 { didSet { save() } }
+    var boundSosMin: Double = 1 { didSet { save() } }
+    var boundSosMax: Double = 365 { didSet { save() } }
+    var boundRspMin: Double = 0.02 { didSet { save() } }
+    var boundRspMax: Double = 0.6 { didSet { save() } }
+    var boundRauMin: Double = 0.02 { didSet { save() } }
+    var boundRauMax: Double = 0.6 { didSet { save() } }
+
+    // Crop calendar
+    var selectedCrop: String = "" { didSet { save() } }
+
+    // Pixel inspection
+    var pixelInspectWindow: Int = 1 { didSet { save() } }
+
+    /// Minimum fractional pixel coverage within AOI to include (0.01 = 1%)
+    var pixelCoverageThreshold: Double = 0.01 { didSet { save() } }
 
     /// SCL classes to treat as VALID (not masked). User can toggle each.
     var sclValidClasses: Set<Int> = [4, 5] { didSet { save() } }
@@ -147,6 +175,10 @@ class AppSettings {
             return "Map rect \(String(format: "%.3f", minLat))\u{2013}\(String(format: "%.3f", maxLat))"
         case .location(let lat, let lon, let d):
             return "My location \(Int(d))m at \(String(format: "%.4f", lat)), \(String(format: "%.4f", lon))"
+        case .digitized:
+            return "Digitized polygon"
+        case .cropSample(let crop, let region):
+            return "\(crop), \(region)"
         }
     }
 
@@ -199,8 +231,24 @@ class AppSettings {
         defaults.set(minSeasonLength, forKey: prefix + "minSeasonLength")
         defaults.set(maxSeasonLength, forKey: prefix + "maxSeasonLength")
         defaults.set(slopeSymmetry, forKey: prefix + "slopeSymmetry")
+        defaults.set(enableSecondPass, forKey: prefix + "enableSecondPass")
+        defaults.set(secondPassWeightMin, forKey: prefix + "secondPassWeightMin")
+        defaults.set(secondPassWeightMax, forKey: prefix + "secondPassWeightMax")
         defaults.set(vegetationIndex.rawValue, forKey: prefix + "vegetationIndex")
         defaults.set(smartAllocation, forKey: prefix + "smartAllocation")
+        defaults.set(boundMnMin, forKey: prefix + "boundMnMin")
+        defaults.set(boundMnMax, forKey: prefix + "boundMnMax")
+        defaults.set(boundDeltaMin, forKey: prefix + "boundDeltaMin")
+        defaults.set(boundDeltaMax, forKey: prefix + "boundDeltaMax")
+        defaults.set(boundSosMin, forKey: prefix + "boundSosMin")
+        defaults.set(boundSosMax, forKey: prefix + "boundSosMax")
+        defaults.set(boundRspMin, forKey: prefix + "boundRspMin")
+        defaults.set(boundRspMax, forKey: prefix + "boundRspMax")
+        defaults.set(boundRauMin, forKey: prefix + "boundRauMin")
+        defaults.set(boundRauMax, forKey: prefix + "boundRauMax")
+        defaults.set(selectedCrop, forKey: prefix + "selectedCrop")
+        defaults.set(pixelInspectWindow, forKey: prefix + "pixelInspectWindow")
+        defaults.set(pixelCoverageThreshold, forKey: prefix + "pixelCoverageThreshold")
     }
 
     private func saveSources() {
@@ -259,12 +307,40 @@ class AppSettings {
         if mxl > 0 { maxSeasonLength = mxl }
         let ss = defaults.integer(forKey: prefix + "slopeSymmetry")
         if ss > 0 { slopeSymmetry = ss }
+        if defaults.object(forKey: prefix + "enableSecondPass") != nil {
+            enableSecondPass = defaults.bool(forKey: prefix + "enableSecondPass")
+        }
+        let spwMin = defaults.double(forKey: prefix + "secondPassWeightMin")
+        if spwMin > 0 { secondPassWeightMin = spwMin }
+        let spwMax = defaults.double(forKey: prefix + "secondPassWeightMax")
+        if spwMax > 0 { secondPassWeightMax = spwMax }
         if let viRaw = defaults.string(forKey: prefix + "vegetationIndex"),
            let vi = VegetationIndex(rawValue: viRaw) {
             vegetationIndex = vi
         }
         if defaults.object(forKey: prefix + "smartAllocation") != nil {
             smartAllocation = defaults.bool(forKey: prefix + "smartAllocation")
+        }
+        // Parameter bounds
+        if defaults.object(forKey: prefix + "boundMnMin") != nil {
+            boundMnMin = defaults.double(forKey: prefix + "boundMnMin")
+            boundMnMax = defaults.double(forKey: prefix + "boundMnMax")
+            boundDeltaMin = defaults.double(forKey: prefix + "boundDeltaMin")
+            boundDeltaMax = defaults.double(forKey: prefix + "boundDeltaMax")
+            boundSosMin = defaults.double(forKey: prefix + "boundSosMin")
+            boundSosMax = defaults.double(forKey: prefix + "boundSosMax")
+            boundRspMin = defaults.double(forKey: prefix + "boundRspMin")
+            boundRspMax = defaults.double(forKey: prefix + "boundRspMax")
+            boundRauMin = defaults.double(forKey: prefix + "boundRauMin")
+            boundRauMax = defaults.double(forKey: prefix + "boundRauMax")
+        }
+        if let crop = defaults.string(forKey: prefix + "selectedCrop") {
+            selectedCrop = crop
+        }
+        let piw = defaults.integer(forKey: prefix + "pixelInspectWindow")
+        if piw > 0 { pixelInspectWindow = piw }
+        if defaults.object(forKey: prefix + "pixelCoverageThreshold") != nil {
+            pixelCoverageThreshold = defaults.double(forKey: prefix + "pixelCoverageThreshold")
         }
         // Restore data source selections and order
         if let data = defaults.data(forKey: prefix + "sources"),

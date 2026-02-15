@@ -43,6 +43,9 @@
 		BB0F00000000000000000004 /* SelectionAnalysisView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0F00000000000000000003 /* SelectionAnalysisView.swift */; };
 		SIG002 /* SigV4Signer.swift in Sources */ = {isa = PBXBuildFile; fileRef = SIG001 /* SigV4Signer.swift */; };
 		CC0F00000000000000000002 /* SourceComparisonView.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC0F00000000000000000001 /* SourceComparisonView.swift */; };
+		DD0F00000000000000000002 /* CropCalendarService.swift in Sources */ = {isa = PBXBuildFile; fileRef = DD0F00000000000000000001 /* CropCalendarService.swift */; };
+		4D77AEEE1A5C4758A41D0E6B /* CropRegionDatabase.swift in Sources */ = {isa = PBXBuildFile; fileRef = 78FA79D21E8743A3913EC158 /* CropRegionDatabase.swift */; };
+		DD0F00000000000000000004 /* ParameterBoundsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DD0F00000000000000000003 /* ParameterBoundsView.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -83,6 +86,9 @@
 		BB0F00000000000000000003 /* SelectionAnalysisView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SelectionAnalysisView.swift; sourceTree = "<group>"; };
 		SIG001 /* SigV4Signer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SigV4Signer.swift; sourceTree = "<group>"; };
 		CC0F00000000000000000001 /* SourceComparisonView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SourceComparisonView.swift; sourceTree = "<group>"; };
+		DD0F00000000000000000001 /* CropCalendarService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CropCalendarService.swift; sourceTree = "<group>"; };
+		78FA79D21E8743A3913EC158 /* CropRegionDatabase.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CropRegionDatabase.swift; sourceTree = "<group>"; };
+		DD0F00000000000000000003 /* ParameterBoundsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ParameterBoundsView.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -150,6 +156,8 @@
 				F10F00000000000000000004 /* DoubleLogistic.swift */,
 				AA0F00000000000000000003 /* PixelPhenologyFitter.swift */,
 				SIG001 /* SigV4Signer.swift */,
+				DD0F00000000000000000001 /* CropCalendarService.swift */,
+				78FA79D21E8743A3913EC158 /* CropRegionDatabase.swift */,
 			);
 			path = Services;
 			sourceTree = "<group>";
@@ -167,6 +175,7 @@
 				BB0F00000000000000000001 /* ClusterView.swift */,
 				BB0F00000000000000000003 /* SelectionAnalysisView.swift */,
 				CC0F00000000000000000001 /* SourceComparisonView.swift */,
+				DD0F00000000000000000003 /* ParameterBoundsView.swift */,
 			);
 			path = Views;
 			sourceTree = "<group>";
@@ -291,6 +300,9 @@
 				BB0F00000000000000000004 /* SelectionAnalysisView.swift in Sources */,
 				CC0F00000000000000000002 /* SourceComparisonView.swift in Sources */,
 				SIG002 /* SigV4Signer.swift in Sources */,
+				DD0F00000000000000000002 /* CropCalendarService.swift in Sources */,
+				4D77AEEE1A5C4758A41D0E6B /* CropRegionDatabase.swift in Sources */,
+				DD0F00000000000000000004 /* ParameterBoundsView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

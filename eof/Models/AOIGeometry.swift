@@ -47,6 +47,15 @@ enum AOIGeometry {
         return GeoJSONGeometry(type: "Polygon", coordinates: [ring])
     }
 
+    /// Generate a GeoJSON Polygon from an array of CLLocationCoordinate2D vertices.
+    static func fromVertices(_ vertices: [(lat: Double, lon: Double)]) -> GeoJSONGeometry {
+        var ring = vertices.map { [$0.lon, $0.lat] }
+        if let first = ring.first, ring.last != first {
+            ring.append(first)
+        }
+        return GeoJSONGeometry(type: "Polygon", coordinates: [ring])
+    }
+
     /// Generate a GeoJSON rectangle from bounding box coordinates.
     static func generateRect(minLat: Double, minLon: Double, maxLat: Double, maxLon: Double) -> GeoJSONGeometry {
         let ring: [[Double]] = [

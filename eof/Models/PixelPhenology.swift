@@ -86,7 +86,7 @@ struct PixelPhenologyResult {
         let goodPixels = pixels.flatMap { $0 }.compactMap { $0 }.filter { $0.fitQuality == .good }
         guard goodPixels.count >= 3 else { return [] }
 
-        let names = ["mn", "\u{0394}", "sos", "rsp", "len", "rau"]
+        let names = ["mn", "amp", "sos", "rsp", "season", "rau"]
         let extractors: [(DLParams) -> Double] = [
             { $0.mn }, { $0.delta }, { $0.sos }, { $0.rsp }, { $0.seasonLength }, { $0.rau }
         ]
@@ -140,6 +140,48 @@ struct PixelPhenologyResult {
                 ? (goodValues[n / 2 - 1] + goodValues[n / 2]) / 2
                 : goodValues[n / 2]
         }
+    }
+
+    /// Reclassify pixels based on a new RMSE threshold without re-running fits.
+    /// Pixels previously classified as poor/good are reclassified by comparing their RMSE
+    /// to the new threshold. Skipped/outlier pixels are left unchanged.
+    func reclassified(rmseThreshold: Double) -> PixelPhenologyResult {
+        var newPixels = pixels
+        for row in 0..<height {
+            for col in 0..<width {
+                guard let px = pixels[row][col] else { continue }
+                let q = px.fitQuality
+                guard q == .good || q == .poor else { continue }
+                let shouldBeGood = px.params.rmse < rmseThreshold
+                let newQuality: PixelPhenology.FitQuality = shouldBeGood ? .good : .poor
+                if newQuality != q {
+                    var reclassified = PixelPhenology(
+                        row: row, col: col,
+                        params: px.params,
+                        nValidObs: px.nValidObs,
+                        fitQuality: newQuality
+                    )
+                    if newQuality == .poor {
+                        reclassified.rejectionDetail = PixelPhenology.RejectionDetail(
+                            reason: .poor,
+                            observationCount: px.nValidObs,
+                            rmse: px.params.rmse,
+                            rmseThreshold: rmseThreshold,
+                            clusterDistance: nil,
+                            clusterThreshold: nil,
+                            paramZScores: nil
+                        )
+                    }
+                    newPixels[row][col] = reclassified
+                }
+            }
+        }
+        return PixelPhenologyResult(
+            width: width, height: height,
+            pixels: newPixels,
+            medianFit: medianFit,
+            computeTimeSeconds: computeTimeSeconds
+        )
     }
 
     /// Cluster filter: identify outlier pixels using robust Mahalanobis-like distance
@@ -243,7 +285,7 @@ struct PixelPhenologyResult {
         }
 
         // Step 3: Apply final outlier flags with rejection detail
-        let paramNames = ["mn", "\u{0394}", "sos", "rsp", "len", "rau"]
+        let paramNames = ["mn", "amp", "sos", "rsp", "season", "rau"]
         var newPixels = pixels
         for row in 0..<height {
             for col in 0..<width {
