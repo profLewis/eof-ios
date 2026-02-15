@@ -29,6 +29,15 @@ struct GeoJSONGeometry: Codable {
         return (lon: (b.minLon + b.maxLon) / 2, lat: (b.minLat + b.maxLat) / 2)
     }
 
+    /// Bounding box dimensions in meters (approximate, WGS84).
+    var bboxMeters: (width: Double, height: Double) {
+        let b = bbox
+        let midLat = (b.minLat + b.maxLat) / 2
+        let width = (b.maxLon - b.minLon) * cos(midLat * .pi / 180) * 111_320
+        let height = (b.maxLat - b.minLat) * 111_320
+        return (width, height)
+    }
+
     /// Encode as GeoJSON dict for STAC intersects parameter
     var asDict: [String: Any] {
         [

@@ -94,6 +94,9 @@ class AppSettings {
     // Crop calendar
     var selectedCrop: String = "" { didSet { save() } }
 
+    // Network
+    var allowCellularDownload: Bool = false { didSet { save() } }
+
     // Spectral unmixing
     var enableSpectralUnmixing: Bool = false { didSet { save() } }
     var showFractionTimeSeries: Bool = false { didSet { save() } }
@@ -245,6 +248,7 @@ class AppSettings {
         defaults.set(secondPassWeightMin, forKey: prefix + "secondPassWeightMin")
         defaults.set(secondPassWeightMax, forKey: prefix + "secondPassWeightMax")
         defaults.set(vegetationIndex.rawValue, forKey: prefix + "vegetationIndex")
+        defaults.set(allowCellularDownload, forKey: prefix + "allowCellularDownload")
         defaults.set(enableSpectralUnmixing, forKey: prefix + "enableSpectralUnmixing")
         defaults.set(showFractionTimeSeries, forKey: prefix + "showFractionTimeSeries")
         defaults.set(dlFitTarget.rawValue, forKey: prefix + "dlFitTarget")
@@ -337,6 +341,9 @@ class AppSettings {
         }
         if defaults.object(forKey: prefix + "smartAllocation") != nil {
             smartAllocation = defaults.bool(forKey: prefix + "smartAllocation")
+        }
+        if defaults.object(forKey: prefix + "allowCellularDownload") != nil {
+            allowCellularDownload = defaults.bool(forKey: prefix + "allowCellularDownload")
         }
         if defaults.object(forKey: prefix + "enableSpectralUnmixing") != nil {
             enableSpectralUnmixing = defaults.bool(forKey: prefix + "enableSpectralUnmixing")

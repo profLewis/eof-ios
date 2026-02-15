@@ -146,6 +146,13 @@ struct SettingsView: View {
                         .foregroundStyle(.secondary)
                 }
 
+                Section("Network") {
+                    Toggle("Allow Cellular Downloads", isOn: $settings.allowCellularDownload)
+                    Text("When off, shows estimated size and asks for confirmation on cellular data.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
                 Section("Spectral Unmixing") {
                     Toggle("Enable Spectral Unmixing", isOn: $settings.enableSpectralUnmixing)
                     Text("Linear mixture model: refl = a\u{00D7}GV + b\u{00D7}NPV + c\u{00D7}Soil")

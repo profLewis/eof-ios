@@ -46,6 +46,7 @@
 		DD0F00000000000000000002 /* CropCalendarService.swift in Sources */ = {isa = PBXBuildFile; fileRef = DD0F00000000000000000001 /* CropCalendarService.swift */; };
 		4D77AEEE1A5C4758A41D0E6B /* CropRegionDatabase.swift in Sources */ = {isa = PBXBuildFile; fileRef = 78FA79D21E8743A3913EC158 /* CropRegionDatabase.swift */; };
 		F2E1D0C9B8A7F6E5D4C3B2A1 /* EndmemberSpectra.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4E5F6A7B8C9D0E1F2 /* EndmemberSpectra.swift */; };
+		D4E5F6A7B8C9D0E1F2A3B4C5 /* NetworkMonitor.swift in Sources */ = {isa = PBXBuildFile; fileRef = C3D4E5F6A7B8C9D0E1F2A3B4 /* NetworkMonitor.swift */; };
 		F2E1D0C9A8B7C6D5E4F3A2B1 /* SpectralUnmixing.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C4D5E6F7A8B9C0D1E2F /* SpectralUnmixing.swift */; };
 		DD0F00000000000000000004 /* ParameterBoundsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DD0F00000000000000000003 /* ParameterBoundsView.swift */; };
 /* End PBXBuildFile section */
@@ -91,6 +92,7 @@
 		DD0F00000000000000000001 /* CropCalendarService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CropCalendarService.swift; sourceTree = "<group>"; };
 		78FA79D21E8743A3913EC158 /* CropRegionDatabase.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CropRegionDatabase.swift; sourceTree = "<group>"; };
 		A1B2C3D4E5F6A7B8C9D0E1F2 /* EndmemberSpectra.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EndmemberSpectra.swift; sourceTree = "<group>"; };
+		C3D4E5F6A7B8C9D0E1F2A3B4 /* NetworkMonitor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NetworkMonitor.swift; sourceTree = "<group>"; };
 		1A2B3C4D5E6F7A8B9C0D1E2F /* SpectralUnmixing.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpectralUnmixing.swift; sourceTree = "<group>"; };
 		DD0F00000000000000000003 /* ParameterBoundsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ParameterBoundsView.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
@@ -163,6 +165,7 @@
 				DD0F00000000000000000001 /* CropCalendarService.swift */,
 				78FA79D21E8743A3913EC158 /* CropRegionDatabase.swift */,
 				A1B2C3D4E5F6A7B8C9D0E1F2 /* EndmemberSpectra.swift */,
+				C3D4E5F6A7B8C9D0E1F2A3B4 /* NetworkMonitor.swift */,
 				1A2B3C4D5E6F7A8B9C0D1E2F /* SpectralUnmixing.swift */,
 			);
 			path = Services;
@@ -309,6 +312,7 @@
 				DD0F00000000000000000002 /* CropCalendarService.swift in Sources */,
 				4D77AEEE1A5C4758A41D0E6B /* CropRegionDatabase.swift in Sources */,
 				F2E1D0C9B8A7F6E5D4C3B2A1 /* EndmemberSpectra.swift in Sources */,
+				D4E5F6A7B8C9D0E1F2A3B4C5 /* NetworkMonitor.swift in Sources */,
 				F2E1D0C9A8B7C6D5E4F3A2B1 /* SpectralUnmixing.swift in Sources */,
 				DD0F00000000000000000004 /* ParameterBoundsView.swift in Sources */,
 			);

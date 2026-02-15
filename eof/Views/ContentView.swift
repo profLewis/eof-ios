@@ -61,6 +61,11 @@ struct ContentView: View {
     // Spectral unmixing
     @State private var frameUnmixResults: [UUID: FrameUnmixResult] = [:]
     @State private var isRunningUnmix = false
+    // Network & download estimation
+    @State private var networkMonitor = NetworkMonitor.shared
+    @State private var showCellularAlert = false
+    @State private var estimatedDownloadMB: Double = 0
+    @State private var pendingGeometry: GeoJSONGeometry?
 
     struct SelectionItem: Identifiable {
         let id = UUID()
@@ -294,6 +299,22 @@ struct ContentView: View {
             .sheet(isPresented: $showingSourceComparison) {
                 SourceComparisonView(pairs: processor.comparisonPairs)
                     .presentationDetents([.large])
+            }
+            .alert("Cellular Download", isPresented: $showCellularAlert) {
+                Button("Download") {
+                    if let geo = pendingGeometry { launchFetch(geometry: geo) }
+                    pendingGeometry = nil
+                }
+                Button("Always Allow") {
+                    settings.allowCellularDownload = true
+                    if let geo = pendingGeometry { launchFetch(geometry: geo) }
+                    pendingGeometry = nil
+                }
+                Button("Cancel", role: .cancel) {
+                    pendingGeometry = nil
+                }
+            } message: {
+                Text("Estimated download: ~\(Int(estimatedDownloadMB)) MB. You're on cellular data.")
             }
         }
     }
@@ -2484,6 +2505,18 @@ struct ContentView: View {
         lastCloudMask = settings.cloudMask
         lastEnforceAOI = settings.enforceAOI
 
+        // Check cellular — warn user with estimated size
+        if networkMonitor.isCellular && !settings.allowCellularDownload {
+            estimatedDownloadMB = estimateDownloadSize(geometry: geometry)
+            pendingGeometry = geometry
+            showCellularAlert = true
+            return
+        }
+
+        launchFetch(geometry: geometry)
+    }
+
+    private func launchFetch(geometry: GeoJSONGeometry) {
         Task {
             await processor.fetch(
                 geometry: geometry,
@@ -2491,6 +2524,25 @@ struct ContentView: View {
                 endDate: settings.endDateString
             )
         }
+    }
+
+    /// Estimate download size in MB from AOI dimensions and date range.
+    private func estimateDownloadSize(geometry: GeoJSONGeometry) -> Double {
+        let dims = geometry.bboxMeters
+        let pixelsW = max(1, dims.width / 10.0)
+        let pixelsH = max(1, dims.height / 10.0)
+        let pixelsPerBand = pixelsW * pixelsH
+        let bytesPerBand = pixelsPerBand * 2 // UInt16
+
+        let bandCount: Double = (settings.displayMode == .ndvi || settings.displayMode == .scl) ? 3 : 5
+        let months = max(1, Calendar.current.dateComponents(
+            [.month], from: settings.startDate, to: settings.endDate).month ?? 1)
+        let estimatedScenes = Double(months) * 6 // S2 ~5-day revisit
+
+        let headerBytes = 128_000.0
+        let compressionRatio = 2.5
+        let perScene = headerBytes + (bytesPerBand * bandCount / compressionRatio)
+        return (perScene * estimatedScenes) / 1_000_000
     }
 
     private func startComparisonFetch() {
