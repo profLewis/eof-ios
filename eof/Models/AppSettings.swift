@@ -427,11 +427,25 @@ class AppSettings {
         }
     }
 
+    /// ISO format for API queries (yyyy-MM-dd).
     var startDateString: String {
-        startDate.formatted(.dateTime.day().month(.abbreviated).year())
+        let fmt = DateFormatter()
+        fmt.dateFormat = "yyyy-MM-dd"
+        return fmt.string(from: startDate)
     }
 
     var endDateString: String {
+        let fmt = DateFormatter()
+        fmt.dateFormat = "yyyy-MM-dd"
+        return fmt.string(from: endDate)
+    }
+
+    /// Display format for UI (locale-friendly).
+    var startDateDisplay: String {
+        startDate.formatted(.dateTime.day().month(.abbreviated).year())
+    }
+
+    var endDateDisplay: String {
         endDate.formatted(.dateTime.day().month(.abbreviated).year())
     }
 }

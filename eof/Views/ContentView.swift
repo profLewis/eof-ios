@@ -341,7 +341,7 @@ struct ContentView: View {
 
     private var headerSection: some View {
         VStack(spacing: 2) {
-            Text("S2 \(settings.displayMode.rawValue) | \(settings.startDateString)–\(settings.endDateString) | \(settings.enabledSources.map { $0.shortName }.joined(separator: "+"))")
+            Text("S2 \(settings.displayMode.rawValue) | \(settings.startDateDisplay)–\(settings.endDateDisplay) | \(settings.enabledSources.map { $0.shortName }.joined(separator: "+"))")
                 .font(.system(size: 9))
                 .foregroundStyle(.secondary)
             Text(settings.aoiSourceLabel)
@@ -435,7 +435,7 @@ struct ContentView: View {
                             .frame(width: 60)
                             .tint(.purple)
                     }
-                    Button(isRunningPixelFit ? "Stop" : "Per-Pixel") {
+                    Button(isRunningPixelFit ? "Stop" : "Pheno") {
                         if isRunningPixelFit {
                             pixelFitTask?.cancel()
                             pixelFitTask = nil
@@ -1894,6 +1894,14 @@ struct ContentView: View {
         return settings.displayMode.rawValue
     }
 
+    /// Short name for the "Live" menu item — shows what the movie is displaying.
+    private var liveDisplayName: String {
+        if settings.displayMode == .ndvi {
+            return settings.vegetationIndex.rawValue
+        }
+        return settings.displayMode.rawValue
+    }
+
     // MARK: - Phenology Indicator Lines (precomputed for chart)
 
     /// Precompute tangent/slope lines for rsp/rau, or vertical/horizontal indicators
@@ -2146,9 +2154,9 @@ struct ContentView: View {
                 startPlayback()
             } label: {
                 if phenologyDisplayParam == nil && !showBadData {
-                    Label("Live", systemImage: "checkmark")
+                    Label(liveDisplayName, systemImage: "checkmark")
                 } else {
-                    Text("Live")
+                    Text(liveDisplayName)
                 }
             }
             if pixelPhenology != nil {
@@ -2199,7 +2207,7 @@ struct ContentView: View {
             HStack(spacing: 4) {
                 Image(systemName: showBadData ? "exclamationmark.triangle.fill" : "map.fill")
                     .font(.system(size: 11))
-                Text(showBadData ? "Bad Data" : (phenologyDisplayParam?.rawValue ?? "Live"))
+                Text(showBadData ? "Bad Data" : (phenologyDisplayParam?.rawValue ?? liveDisplayName))
                     .font(.system(size: 11, weight: .semibold))
                 Image(systemName: "chevron.up.chevron.down")
                     .font(.system(size: 8))
