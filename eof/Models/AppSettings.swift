@@ -38,12 +38,14 @@ class AppSettings {
     enum VegetationIndex: String, CaseIterable {
         case ndvi = "NDVI"
         case dvi = "DVI"
+        case fvc = "FVC"
 
         var label: String { rawValue }
         var description: String {
             switch self {
             case .ndvi: return "(NIR \u{2212} Red) / (NIR + Red)"
             case .dvi: return "NIR \u{2212} Red"
+            case .fvc: return "Green vegetation fraction (unmixing)"
             }
         }
     }
@@ -60,7 +62,7 @@ class AppSettings {
     var enforceAOI: Bool = true { didSet { save() } }
     var showMaskedClassColors: Bool = false { didSet { save() } }
     var showBasemap: Bool = true { didSet { save() } }
-    var vegetationIndex: VegetationIndex = .ndvi { didSet { save() } }
+    var vegetationIndex: VegetationIndex = .fvc { didSet { save() } }
 
     // Per-pixel phenology settings
     var pixelEnsembleRuns: Int = 5 { didSet { save() } }
@@ -104,6 +106,7 @@ class AppSettings {
     enum DLFitTarget: String, CaseIterable {
         case vi = "VI"
         case fveg = "Vegetation Fraction"
+        case fnpv = "NPV Fraction"
     }
     var dlFitTarget: DLFitTarget = .vi { didSet { save() } }
 

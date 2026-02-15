@@ -490,24 +490,25 @@ struct HelpView: View {
             }
             DisclosureGroup("Fraction maps & time series") {
                 helpText("""
-                When spectral unmixing is enabled (Settings → Spectral Unmixing):
+                Select FVC as the vegetation index to use green vegetation fraction \
+                as the primary quantity. Unmixing runs automatically. The chart shows \
+                median fVeg (observations) with the DL fit curve.
 
                 Fraction maps: Select FVC, NPV, Soil, or Unmix RMSE from the \
                 Live menu. These are per-frame animated maps showing how fractions \
                 change through the season.
 
-                Fraction time series: Enable "Show Fraction Time Series" to \
-                overlay fVeg (green), fNPV (brown), and fSoil (orange) as dashed \
-                lines on the VI chart.
+                Fraction time series: fNPV (brown dashed) and fSoil (orange dashed) \
+                are overlaid on the chart along with fitted temporal models:
+                • fSoil: single decreasing logistic at SOS (soil exposed → vegetation cover)
+                • fNPV: single increasing logistic at EOS (green → senesced vegetation)
 
-                Predicted spectrum: The spectral plot shows a purple "Predicted" \
-                line — the reconstructed spectrum from unmixing fractions. Compare \
-                this to the observed (red) line to assess model quality.
+                The fraction models are derived from the DL fit parameters (SOS, EOS, \
+                rsp, rau) — the transition timing and rate are shared with fVeg.
 
-                DL fit to fVeg: Instead of fitting the double logistic to NDVI, \
-                you can fit it to the green vegetation fraction (fVeg). This may \
-                give more physically meaningful phenology parameters since fVeg \
-                is a linear quantity (unlike NDVI which saturates).
+                Second pass: When enabled, the per-pixel fit also derives \
+                fraction model parameters for each pixel, giving spatially-resolved \
+                soil exposure and senescence timing.
                 """)
             }
         }

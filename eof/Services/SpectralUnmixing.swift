@@ -87,7 +87,8 @@ enum SpectralUnmixing {
         bandInfo: [(band: String, nm: Double)],
         dnOffset: Float,
         width: Int,
-        height: Int
+        height: Int,
+        validMask: [[Bool]]? = nil
     ) -> FrameUnmixResult {
         let endmembers = EndmemberLibrary.defaults
         // Build endmember matrix for available bands only
@@ -105,6 +106,10 @@ enum SpectralUnmixing {
 
         for row in 0..<height {
             for col in 0..<width {
+                // Skip pixels outside AOI mask
+                if let mask = validMask, row < mask.count, col < mask[row].count, !mask[row][col] {
+                    continue
+                }
                 // Extract observed reflectance for this pixel
                 var observed = [Float]()
                 var valid = true

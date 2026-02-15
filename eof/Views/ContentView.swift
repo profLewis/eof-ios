@@ -62,6 +62,7 @@ struct ContentView: View {
     @State private var frameUnmixResults: [UUID: FrameUnmixResult] = [:]
     @State private var isRunningUnmix = false
     @State private var unmixProgress: Double = 0
+    // showColorBar removed — always show
     // Network & download estimation
     @State private var networkMonitor = NetworkMonitor.shared
     @State private var showCellularAlert = false
@@ -131,8 +132,8 @@ struct ContentView: View {
                     if processor.frames.count >= 4 {
                         runDLFit()
                     }
-                    // Auto-run spectral unmixing if enabled
-                    if settings.enableSpectralUnmixing {
+                    // Auto-run spectral unmixing if FVC mode or enabled in settings
+                    if settings.vegetationIndex == .fvc || settings.enableSpectralUnmixing {
                         runUnmixing()
                     }
                 }
@@ -147,15 +148,14 @@ struct ContentView: View {
                     runUnmixing()
                 }
             }
-            .onChange(of: settings.dlFitTarget) {
-                if settings.dlFitTarget == .fveg && frameUnmixResults.isEmpty && !processor.frames.isEmpty {
-                    // Need to unmix first before fitting to fVeg
+            .onChange(of: settings.vegetationIndex) {
+                if settings.vegetationIndex == .fvc && frameUnmixResults.isEmpty && !processor.frames.isEmpty {
+                    // Need to unmix first before fitting to FVC
                     runUnmixing()
                 }
                 if dlBest != nil {
-                    // Wait briefly for unmix to complete if just started, then refit
-                    if settings.dlFitTarget == .fveg && frameUnmixResults.isEmpty {
-                        // Will refit when unmix completes — add observer below
+                    if settings.vegetationIndex == .fvc && frameUnmixResults.isEmpty {
+                        // Will refit when unmix completes
                     } else {
                         runDLFit()
                     }
@@ -412,7 +412,7 @@ struct ContentView: View {
                 }
             case .done:
                 HStack {
-                    Button(settings.dlFitTarget == .fveg && !frameUnmixResults.isEmpty ? "Fit fVeg" : "Fit") {
+                    Button(settings.vegetationIndex == .fvc && !frameUnmixResults.isEmpty ? "Fit FVC" : "Fit") {
                         runDLFit()
                     }
                     .font(.caption)
@@ -793,6 +793,7 @@ struct ContentView: View {
                         // Static colorbar (not affected by zoom/pan)
                         if phenologyDisplayParam == nil && !showBadData && settings.displayMode == .ndvi {
                             NDVIColorBarCompact()
+                                .padding(.horizontal, 4)
                                 .padding(.bottom, 2)
                         }
                     }
@@ -915,9 +916,9 @@ struct ContentView: View {
         }
     }
 
-    /// Whether the chart should display fVeg values (when fitting to fVeg and unmix results exist).
+    /// Whether the chart should display fVeg values (when VI is FVC and unmix results exist).
     private var chartShowsFveg: Bool {
-        settings.dlFitTarget == .fveg && !frameUnmixResults.isEmpty
+        settings.vegetationIndex == .fvc && !frameUnmixResults.isEmpty
     }
 
     /// Get the chart y-value for a frame depending on display mode.
@@ -1026,18 +1027,8 @@ struct ContentView: View {
 
                 // Per-pixel time series (when inspecting)
                 if isInspectingPixel {
-                    let pixData = pixelNDVIData(sorted: sorted)
-                    ForEach(pixData) { pt in
-                        LineMark(
-                            x: .value("Date", pt.date),
-                            y: .value(viLabel, pt.ndvi),
-                            series: .value("Series", "Pixel")
-                        )
-                        .foregroundStyle(.orange.opacity(0.8))
-                        .lineStyle(StrokeStyle(lineWidth: 2))
-                    }
-                    // Pixel-level fVeg time series (when unmixed)
-                    if !frameUnmixResults.isEmpty {
+                    if settings.vegetationIndex == .fvc && !frameUnmixResults.isEmpty {
+                        // FVC mode: show only fVeg pixel data
                         let fvegData = pixelFvegData(sorted: sorted)
                         ForEach(fvegData) { pt in
                             LineMark(
@@ -1045,8 +1036,33 @@ struct ContentView: View {
                                 y: .value(viLabel, pt.ndvi),
                                 series: .value("Series", "PixelFveg")
                             )
-                            .foregroundStyle(.green.opacity(0.6))
-                            .lineStyle(StrokeStyle(lineWidth: 1.5, dash: [4, 2]))
+                            .foregroundStyle(.green.opacity(0.8))
+                            .lineStyle(StrokeStyle(lineWidth: 2))
+                        }
+                    } else {
+                        // VI mode: show VI pixel data
+                        let pixData = pixelNDVIData(sorted: sorted)
+                        ForEach(pixData) { pt in
+                            LineMark(
+                                x: .value("Date", pt.date),
+                                y: .value(viLabel, pt.ndvi),
+                                series: .value("Series", "Pixel")
+                            )
+                            .foregroundStyle(.orange.opacity(0.8))
+                            .lineStyle(StrokeStyle(lineWidth: 2))
+                        }
+                        // Also show fVeg if unmixed (as secondary)
+                        if !frameUnmixResults.isEmpty {
+                            let fvegData = pixelFvegData(sorted: sorted)
+                            ForEach(fvegData) { pt in
+                                LineMark(
+                                    x: .value("Date", pt.date),
+                                    y: .value(viLabel, pt.ndvi),
+                                    series: .value("Series", "PixelFveg")
+                                )
+                                .foregroundStyle(.green.opacity(0.6))
+                                .lineStyle(StrokeStyle(lineWidth: 1.5, dash: [4, 2]))
+                            }
                         }
                     }
                 }
@@ -1168,17 +1184,20 @@ struct ContentView: View {
                     .lineStyle(StrokeStyle(lineWidth: 2.5))
                 }
 
-                // Fraction time series (when unmixing enabled)
+                // Fraction time series (when unmixing results exist)
                 if !frameUnmixResults.isEmpty {
-                    ForEach(validSorted) { frame in
-                        if let fv = medianFraction(for: frame, param: .fveg) {
-                            LineMark(
-                                x: .value("Date", frame.date),
-                                y: .value(viLabel, fv),
-                                series: .value("Series", "fVeg")
-                            )
-                            .foregroundStyle(.green.opacity(0.6))
-                            .lineStyle(StrokeStyle(lineWidth: 1.5, dash: [6, 3]))
+                    // In FVC mode, fVeg is the main series (shown as median line), skip dashed duplicate
+                    if settings.vegetationIndex != .fvc {
+                        ForEach(validSorted) { frame in
+                            if let fv = medianFraction(for: frame, param: .fveg) {
+                                LineMark(
+                                    x: .value("Date", frame.date),
+                                    y: .value(viLabel, fv),
+                                    series: .value("Series", "fVeg")
+                                )
+                                .foregroundStyle(.green.opacity(0.6))
+                                .lineStyle(StrokeStyle(lineWidth: 1.5, dash: [6, 3]))
+                            }
                         }
                     }
                     ForEach(validSorted) { frame in
@@ -1332,7 +1351,8 @@ struct ContentView: View {
             }
             let frames = processor.frames
             log.info("Unmixing \(frames.count) frames (\(frames.first?.greenBand != nil ? "4" : "2") bands)...")
-            // Capture frame data for background processing
+            // Capture frame data for background processing (with AOI mask from ndvi)
+            let enforceAOI = settings.enforceAOI
             struct FrameData: Sendable {
                 let id: UUID
                 let redBand: [[UInt16]]
@@ -1342,11 +1362,16 @@ struct ContentView: View {
                 let dnOffset: Float
                 let width: Int
                 let height: Int
+                let validMask: [[Bool]]  // true = inside AOI and valid
             }
             let frameData = frames.map { f in
-                FrameData(id: f.id, redBand: f.redBand, nirBand: f.nirBand,
+                let mask: [[Bool]] = enforceAOI
+                    ? f.ndvi.map { row in row.map { !$0.isNaN } }
+                    : [[Bool]](repeating: [Bool](repeating: true, count: f.width), count: f.height)
+                return FrameData(id: f.id, redBand: f.redBand, nirBand: f.nirBand,
                           greenBand: f.greenBand, blueBand: f.blueBand,
-                          dnOffset: f.dnOffset, width: f.width, height: f.height)
+                          dnOffset: f.dnOffset, width: f.width, height: f.height,
+                          validMask: mask)
             }
             let results = await Task.detached { () -> [UUID: FrameUnmixResult] in
                 var results = [UUID: FrameUnmixResult]()
@@ -1370,7 +1395,8 @@ struct ContentView: View {
                     let result = SpectralUnmixing.unmixFrame(
                         bands: bands, bandInfo: bandInfo,
                         dnOffset: fd.dnOffset,
-                        width: fd.width, height: fd.height
+                        width: fd.width, height: fd.height,
+                        validMask: fd.validMask
                     )
                     results[fd.id] = result
                     let progress = Double(i + 1) / total
@@ -1381,8 +1407,8 @@ struct ContentView: View {
             frameUnmixResults = results
             isRunningUnmix = false
             log.success("Unmixing done: \(results.count) frames, fVeg/fNPV/fSoil/RMSE maps available in Live menu")
-            // Auto-refit if target is fVeg
-            if settings.dlFitTarget == .fveg && dlBest != nil {
+            // Auto-refit if VI is FVC
+            if settings.vegetationIndex == .fvc && dlBest != nil {
                 runDLFit()
             }
         }
@@ -1779,7 +1805,50 @@ struct ContentView: View {
             }
         }
 
+        // Fraction model curves (fSoil single decreasing logistic, fNPV single increasing logistic)
+        if let dl = dlBest, !frameUnmixResults.isEmpty, !isInspectingPixel {
+            // Estimate max fraction values from observed medians
+            let soilMax = estimateMaxFraction(param: .fsoil, sorted: sorted)
+            let npvMax = estimateMaxFraction(param: .fnpv, sorted: sorted)
+
+            if soilMax > 0.01 {
+                for cdoy in cdoys {
+                    if let d = dateForCDOY(cdoy) {
+                        pts.append(DLCurvePoint(
+                            id: "fsoil_\(cdoy)", date: d,
+                            ndvi: dl.evaluateSoilFraction(t: Double(cdoy), maxVal: soilMax),
+                            series: "fSoil-fit",
+                            color: .orange.opacity(0.7),
+                            style: StrokeStyle(lineWidth: 2)
+                        ))
+                    }
+                }
+            }
+            if npvMax > 0.01 {
+                for cdoy in cdoys {
+                    if let d = dateForCDOY(cdoy) {
+                        pts.append(DLCurvePoint(
+                            id: "fnpv_\(cdoy)", date: d,
+                            ndvi: dl.evaluateNPVFraction(t: Double(cdoy), maxVal: npvMax),
+                            series: "fNPV-fit",
+                            color: .brown.opacity(0.7),
+                            style: StrokeStyle(lineWidth: 2)
+                        ))
+                    }
+                }
+            }
+        }
+
         return pts
+    }
+
+    /// Estimate maximum fraction value from observed medians (for single logistic amplitude).
+    private func estimateMaxFraction(param: PhenologyParameter, sorted: [NDVIFrame]) -> Double {
+        let vals = sorted.compactMap { medianFraction(for: $0, param: param) }
+        guard !vals.isEmpty else { return 0 }
+        let s = vals.sorted()
+        // Use 90th percentile as max
+        return s[min(s.count - 1, s.count * 9 / 10)]
     }
 
     // MARK: - Phenology Indicator Lines (precomputed for chart)
@@ -1787,11 +1856,22 @@ struct ContentView: View {
     /// Precompute tangent/slope lines for rsp/rau, or vertical/horizontal indicators
     /// for other phenology parameters. Returns DLCurvePoint array to render as LineMarks.
     private func phenologyIndicatorLines(sorted: [NDVIFrame]) -> [DLCurvePoint] {
-        guard let param = phenologyDisplayParam, let fit = dlBest,
+        guard let param = phenologyDisplayParam, let medianFit = dlBest,
               let firstDate = sorted.first?.date else { return [] }
         let cal = Calendar.current
         let refYr = cal.component(.year, from: firstDate)
         var pts = [DLCurvePoint]()
+
+        // Use pixel-specific params when inspecting, otherwise median
+        let pixelFit: DLParams? = {
+            guard isInspectingPixel, let pp = pixelPhenology,
+                  inspectedPixelRow >= 0, inspectedPixelRow < pp.height,
+                  inspectedPixelCol >= 0, inspectedPixelCol < pp.width,
+                  let px = pp.pixels[inspectedPixelRow][inspectedPixelCol],
+                  px.fitQuality != .skipped else { return nil }
+            return px.params
+        }()
+        let fit = pixelFit ?? medianFit
 
         // Convert continuous DOY to Date (handles year boundaries)
         func dateForCDOY(_ cdoy: Int) -> Date? {
@@ -1892,6 +1972,28 @@ struct ContentView: View {
             pts.append(DLCurvePoint(id: "rmse_h1", date: last, ndvi: fit.rmse,
                 series: "rmse-line", color: .red.opacity(0.5),
                 style: StrokeStyle(lineWidth: 1.5, dash: [4, 2])))
+        }
+
+        // Dimmed median reference lines when inspecting a pixel
+        if pixelFit != nil, (param == .sos || param == .seasonLength || param == .rsp || param == .rau) {
+            let mSOS = Int(medianFit.sos)
+            let mEOS = Int(medianFit.eos)
+            if let sosD = dateForCDOY(mSOS) {
+                pts.append(DLCurvePoint(id: "ref_sos0", date: sosD, ndvi: -0.2,
+                    series: "ref-sos", color: .primary.opacity(0.15),
+                    style: StrokeStyle(lineWidth: 1, dash: [3, 3])))
+                pts.append(DLCurvePoint(id: "ref_sos1", date: sosD, ndvi: 1.0,
+                    series: "ref-sos", color: .primary.opacity(0.15),
+                    style: StrokeStyle(lineWidth: 1, dash: [3, 3])))
+            }
+            if let eosD = dateForCDOY(mEOS) {
+                pts.append(DLCurvePoint(id: "ref_eos0", date: eosD, ndvi: -0.2,
+                    series: "ref-eos", color: .primary.opacity(0.15),
+                    style: StrokeStyle(lineWidth: 1, dash: [3, 3])))
+                pts.append(DLCurvePoint(id: "ref_eos1", date: eosD, ndvi: 1.0,
+                    series: "ref-eos", color: .primary.opacity(0.15),
+                    style: StrokeStyle(lineWidth: 1, dash: [3, 3])))
+            }
         }
 
         return pts
@@ -2271,7 +2373,7 @@ struct ContentView: View {
 
     private func runDLFit() {
         let refYr = referenceYear
-        let useFveg = settings.dlFitTarget == .fveg && !frameUnmixResults.isEmpty
+        let useFveg = settings.vegetationIndex == .fvc && !frameUnmixResults.isEmpty
         let data = processor.frames.filter { $0.validPixelCount > 0 }.compactMap { f -> DoubleLogistic.DataPoint? in
             let val: Double
             if useFveg, let fv = medianFraction(for: f, param: .fveg) {

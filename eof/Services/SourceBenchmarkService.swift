@@ -132,7 +132,7 @@ struct SourceBenchmarkService {
         // Adjust if over-allocated
         while allocated > totalStreams, let maxKey = allocation.max(by: { $0.value < $1.value })?.key,
               (allocation[maxKey] ?? 0) > 1 {
-            allocation[maxKey]! -= 1
+            allocation[maxKey, default: 0] -= 1
             allocated -= 1
         }
 

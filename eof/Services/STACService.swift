@@ -8,7 +8,7 @@ struct STACService {
         self.config = config
     }
 
-    var searchURL: URL { URL(string: config.searchURL)! }
+    var searchURL: URL { URL(string: config.searchURL) ?? URL(string: "https://earth-search.aws.element84.com/v1/search")! }
     var collection: String { config.collection }
 
     /// Search for Sentinel-2 items overlapping a geometry within a date range.

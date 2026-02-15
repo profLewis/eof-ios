@@ -312,15 +312,17 @@ class NDVIProcessor {
                 return recent.reduce(0, +) / Double(recent.count)
             }
 
-            func pickBestSource(from candidates: [(STACItem, STACSourceConfig)]) -> (STACItem, STACSourceConfig) {
-                guard candidates.count > 1 else { return candidates[0] }
+            func pickBestSource(from candidates: [(STACItem, STACSourceConfig)]) -> (STACItem, STACSourceConfig)? {
+                guard let first = candidates.first else { return nil }
+                guard candidates.count > 1 else { return first }
                 // Score each candidate; pick randomly among those within 20% of the best
                 let scored = candidates.map { c in
                     (c, avgLatency(c.1.sourceID) + Double(sourceInFlight[c.1.sourceID] ?? 0) * 0.5)
                 }
-                let bestScore = scored.map(\.1).min()!
+                guard let bestScore = scored.map(\.1).min() else { return first }
                 let threshold = bestScore * 1.2 + 0.1  // 20% tolerance + small absolute margin
                 let eligible = scored.filter { $0.1 <= threshold }.map(\.0)
+                guard !eligible.isEmpty else { return first }
                 // Among eligible, prefer highest processing baseline
                 let sorted = eligible.sorted { a, b in
                     let pbA = Double(a.0.properties.processingBaseline ?? "0") ?? 0
@@ -329,7 +331,7 @@ class NDVIProcessor {
                 }
                 let bestPB = Double(sorted[0].0.properties.processingBaseline ?? "0") ?? 0
                 let topPB = sorted.filter { (Double($0.0.properties.processingBaseline ?? "0") ?? 0) == bestPB }
-                return topPB.randomElement()!
+                return topPB.randomElement() ?? first
             }
 
             await withTaskGroup(of: ProcessResult.self) { group in
@@ -440,7 +442,8 @@ class NDVIProcessor {
                     if self.compareSourcesMode && candidates.count > 1 {
                         selectedCandidates = candidates
                     } else {
-                        selectedCandidates = [pickBestSource(from: candidates)]
+                        guard let best = pickBestSource(from: candidates) else { continue }
+                        selectedCandidates = [best]
                     }
 
                     for (item, cfg) in selectedCandidates {
@@ -528,7 +531,7 @@ class NDVIProcessor {
                             }
 
                             racedKeys.insert(raceKey)
-                            let (item, cfg) = pickBestSource(from: altCandidates)
+                            guard let (item, cfg) = pickBestSource(from: altCandidates) else { continue }
                             sourceInFlight[cfg.sourceID, default: 0] += 1
                             inFlightKeys[raceKey, default: 0] += 1
                             keySourcesUsed[raceKey, default: []].insert(cfg.sourceID)
@@ -613,7 +616,7 @@ class NDVIProcessor {
                         continue
                     }
 
-                    let (item, cfg) = pickBestSource(from: candidates)
+                    guard let (item, cfg) = pickBestSource(from: candidates) else { continue }
                     sourceInFlight[cfg.sourceID, default: 0] += 1
                     inFlightKeys[retry.key, default: 0] += 1
                     let retryDateKey = retry.key
@@ -1318,7 +1321,7 @@ class NDVIProcessor {
                     // Compute selected vegetation index
                     let val: Float
                     switch viMode {
-                    case .ndvi:
+                    case .ndvi, .fvc:
                         let sum = nirR + redR
                         guard sum > 0 else { zeroSumCount += 1; continue }
                         val = (nirR - redR) / sum
@@ -1417,7 +1420,7 @@ class NDVIProcessor {
                                 let nirR2 = max(Float(0), nirRefl2)
                                 let val2: Float
                                 switch viMode {
-                                case .ndvi:
+                                case .ndvi, .fvc:
                                     let sum2 = nirR2 + redR2
                                     guard sum2 > 0 else { continue }
                                     val2 = (nirR2 - redR2) / sum2
@@ -1698,7 +1701,7 @@ class NDVIProcessor {
 
                 let val: Float
                 switch viMode {
-                case .ndvi:
+                case .ndvi, .fvc:
                     let sum = nirRefl + redRefl
                     guard sum > 0 else { continue }
                     val = (nirRefl - redRefl) / sum
@@ -1897,7 +1900,7 @@ class NDVIProcessor {
 
                     let val: Float
                     switch viMode {
-                    case .ndvi:
+                    case .ndvi, .fvc:
                         let sum = nirR + redR
                         guard sum > 0 else { continue }
                         val = (nirR - redR) / sum

@@ -133,7 +133,7 @@ struct SettingsView: View {
                 }
 
                 Section("Vegetation Index") {
-                    Picker("Fitting VI", selection: $settings.vegetationIndex) {
+                    Picker("VI", selection: $settings.vegetationIndex) {
                         ForEach(AppSettings.VegetationIndex.allCases, id: \.self) { vi in
                             Text(vi.label).tag(vi)
                         }
@@ -142,9 +142,15 @@ struct SettingsView: View {
                     Text(settings.vegetationIndex.description)
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                    Text("DVI averages linearly across pixel sizes. NDVI is normalized but non-linear.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                    if settings.vegetationIndex == .fvc {
+                        Text("FVC requires spectral unmixing (auto-triggered). DL fit targets green vegetation fraction.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    } else {
+                        Text("DVI averages linearly across pixel sizes. NDVI is normalized but non-linear.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
                 }
 
                 Section("Network") {
@@ -155,22 +161,10 @@ struct SettingsView: View {
                 }
 
                 Section("Spectral Unmixing") {
-                    Toggle("Enable Spectral Unmixing", isOn: $settings.enableSpectralUnmixing)
+                    Toggle("Show Fraction Time Series", isOn: $settings.showFractionTimeSeries)
                     Text("Linear mixture model: refl = a\u{00D7}GV + b\u{00D7}NPV + c\u{00D7}Soil")
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                    if settings.enableSpectralUnmixing {
-                        Toggle("Show Fraction Time Series", isOn: $settings.showFractionTimeSeries)
-                        Picker("DL Fit Target", selection: $settings.dlFitTarget) {
-                            ForEach(AppSettings.DLFitTarget.allCases, id: \.self) { t in
-                                Text(t.rawValue).tag(t)
-                            }
-                        }
-                        .pickerStyle(.segmented)
-                        Text("Fit double logistic to VI values or green vegetation fraction (fveg).")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
                 }
 
                 Section("Filters") {
@@ -264,7 +258,7 @@ struct SettingsView: View {
 
                 Section("Fitting — Second Pass") {
                     Toggle("Second Pass (DL-weighted)", isOn: $settings.enableSecondPass)
-                    Text("Re-fit using weights derived from the first-pass DL curve. Observations near peak season get higher weight.")
+                    Text("Re-fit using weights from the first-pass DL curve. Peak-season observations get higher weight. In FVC mode, also fits single logistic curves to fSoil (decreasing at SOS) and fNPV (increasing at EOS) for each pixel.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
 

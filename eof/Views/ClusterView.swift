@@ -8,12 +8,16 @@ struct ClusterView: View {
 
     private let paramNames = ["SOS", "Season", "Amp", "Min", "rsp", "rau"]
 
+    @State private var scatterX: Int = 0  // SOS
+    @State private var scatterY: Int = 4  // rsp (green-up)
+
     var body: some View {
         NavigationStack {
             ScrollView {
                 VStack(spacing: 16) {
                     summarySection
                     qualityPieChart
+                    scatterPlotSection
                     parameterDistributions
                     uncertaintyTable
                 }
@@ -227,6 +231,59 @@ struct ClusterView: View {
         case "sos", "eos": return String(format: "%.1f", value)
         case "rsp", "rau": return String(format: "%.4f", value)
         default: return String(format: "%.3f", value)
+        }
+    }
+
+    // MARK: - Scatter Plot
+
+    private var scatterPlotSection: some View {
+        let goodPixels = result.pixels.flatMap { $0 }.compactMap { $0 }.filter { $0.fitQuality == .good }
+
+        return VStack(alignment: .leading, spacing: 4) {
+            Text("Parameter Scatter")
+                .font(.caption.bold())
+            HStack(spacing: 4) {
+                Text("X:")
+                    .font(.system(size: 9))
+                    .foregroundStyle(.secondary)
+                Picker("X", selection: $scatterX) {
+                    ForEach(0..<6, id: \.self) { i in
+                        Text(paramNames[i]).tag(i)
+                    }
+                }
+                .pickerStyle(.menu)
+                .labelsHidden()
+                Text("Y:")
+                    .font(.system(size: 9))
+                    .foregroundStyle(.secondary)
+                Picker("Y", selection: $scatterY) {
+                    ForEach(0..<6, id: \.self) { i in
+                        Text(paramNames[i]).tag(i)
+                    }
+                }
+                .pickerStyle(.menu)
+                .labelsHidden()
+            }
+
+            if goodPixels.count >= 2 {
+                Chart {
+                    ForEach(Array(goodPixels.prefix(500).enumerated()), id: \.offset) { _, px in
+                        PointMark(
+                            x: .value(paramNames[scatterX], extractParam(scatterX, px.params)),
+                            y: .value(paramNames[scatterY], extractParam(scatterY, px.params))
+                        )
+                        .symbolSize(8)
+                        .foregroundStyle(.green.opacity(0.4))
+                    }
+                }
+                .frame(height: 160)
+                .chartXAxisLabel(paramNames[scatterX])
+                .chartYAxisLabel(paramNames[scatterY])
+            } else {
+                Text("Need per-pixel fit results")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
         }
     }
 }

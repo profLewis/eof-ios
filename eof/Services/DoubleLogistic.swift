@@ -18,6 +18,26 @@ struct DLParams: Codable, Equatable {
         return mn + (mx - mn) * (spring + autumn - 1.0)
     }
 
+    /// Evaluate the inverted double logistic (for fSoil — high in winter, low at peak season).
+    func evaluateInverted(t: Double) -> Double {
+        let spring = 1.0 / (1.0 + exp(-rsp * (t - sos)))
+        let autumn = 1.0 / (1.0 + exp(rau * (t - eos)))
+        return mx - (mx - mn) * (spring + autumn - 1.0)
+    }
+
+    /// Single decreasing logistic for fSoil: high before SOS, decreases to ~0 during green-up.
+    /// fSoil(t) = maxVal / (1 + exp(rsp * (t - sos)))
+    func evaluateSoilFraction(t: Double, maxVal: Double) -> Double {
+        let spring = 1.0 / (1.0 + exp(-rsp * (t - sos)))
+        return maxVal * (1.0 - spring)
+    }
+
+    /// Single increasing logistic for fNPV: near 0 until EOS, then rises during senescence.
+    /// fNPV(t) = maxVal / (1 + exp(-rau * (t - eos)))
+    func evaluateNPVFraction(t: Double, maxVal: Double) -> Double {
+        return maxVal / (1.0 + exp(-rau * (t - eos)))
+    }
+
     /// Evaluate at an array of DOYs.
     func curve(doys: [Double]) -> [Double] {
         doys.map { evaluate(t: $0) }

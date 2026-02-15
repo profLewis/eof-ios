@@ -94,10 +94,11 @@ struct PixelPhenologyResult {
         return zip(names, extractors).map { name, extract in
             let values = goodPixels.map { extract($0.params) }.sorted()
             let n = values.count
-            let median = n % 2 == 0
+            guard n > 0 else { return (name: name, median: 0, iqr: 0) }
+            let median = n == 1 ? values[0] : (n % 2 == 0
                 ? (values[n / 2 - 1] + values[n / 2]) / 2
-                : values[n / 2]
-            let q1 = values[n / 4]
+                : values[n / 2])
+            let q1 = values[max(0, n / 4)]
             let q3 = values[min(n - 1, 3 * n / 4)]
             return (name: name, median: median, iqr: q3 - q1)
         }
