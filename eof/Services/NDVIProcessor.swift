@@ -17,6 +17,7 @@ class NDVIProcessor {
     var compareSourcesMode = false
     var comparisonPairs: [SourceComparisonView.ComparisonPair] = []
     var cachedFrames: [NDVIFrame] = []
+    var estimatedDownloadMB: Double = 0
 
     private var lastGeometryCentroid: (lon: Double, lat: Double)?
     private var fetchTask: Task<Void, Never>?
@@ -222,7 +223,30 @@ class NDVIProcessor {
                 let multiSourceDates = orderedKeys.filter { (candidatesByKey[$0]?.count ?? 0) > 1 }.count
                 log.info("COMPARISON MODE: \(totalItems) tasks (\(multiSourceDates) dates with multiple sources)")
             }
-            progressMessage = "Found \(totalItems) scenes — reading imagery..."
+
+            // Refined download size estimate (actual scene count known)
+            let dims = geometry.bboxMeters
+            let pixelsPerBand = max(1, dims.width / 10.0) * max(1, dims.height / 10.0)
+            let bandCount: Double = (settings.displayMode == .ndvi || settings.displayMode == .scl) ? 3 : 5
+            let perSceneMB = (128_000 + pixelsPerBand * 2 * bandCount / 2.5) / 1_000_000
+            estimatedDownloadMB = perSceneMB * Double(totalItems)
+            let estStr = estimatedDownloadMB < 1 ? "<1" : String(Int(estimatedDownloadMB))
+            log.info("Estimated download: ~\(estStr) MB (\(totalItems) scenes \u{00D7} \(String(format: "%.1f", perSceneMB * 1000)) KB/scene)")
+
+            // Cloud filter advice
+            let cloudThresholdSetting = settings.cloudThreshold
+            if cloudThresholdSetting >= 100 {
+                var cloudy = 0
+                for key in orderedKeys {
+                    if let item = candidatesByKey[key]?.first?.0,
+                       let cc = item.properties.cloudCover, cc > 50 { cloudy += 1 }
+                }
+                if cloudy > 0 {
+                    log.warn("\(cloudy)/\(totalItems) scenes have >50% cloud. Consider lowering cloud threshold to reduce download size.")
+                }
+            }
+
+            progressMessage = "Found \(totalItems) scenes (~\(estStr) MB) — reading imagery..."
             status = .processing
 
             // 2. Determine UTM zone from geometry centroid
