@@ -38,6 +38,10 @@ struct ContentView: View {
     @State private var showingClusterView = false
     @State private var showData = true
     @State private var dataOpacity: Double = 1.0
+    // Collapsible panels
+    @State private var showMovie = true
+    @State private var showChart = true
+    @State private var showColorbar = true
     // Cluster filter
     @State private var unfilteredPhenology: PixelPhenologyResult?
     @State private var isClusterFiltered = false
@@ -517,6 +521,14 @@ struct ContentView: View {
                         Text("DOY \(frame.dayOfYear)")
                             .font(.caption.monospacedDigit())
                             .foregroundStyle(.secondary)
+                        Spacer()
+                        Button {
+                            withAnimation(.easeInOut(duration: 0.2)) { showMovie.toggle() }
+                        } label: {
+                            Image(systemName: showMovie ? "chevron.up" : "photo")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
                     }
 
                     let currentPhenoMap: [[Float]]? = phenologyDisplayParam.flatMap { param in
@@ -527,6 +539,7 @@ struct ContentView: View {
                     }
                     let currentRejectionMap: [[Float]]? = showBadData ? pixelPhenology?.rejectionReasonMap() : nil
 
+                    if showMovie {
                     GeometryReader { geo in
                         let fitScale = max(1, min(8, geo.size.width / CGFloat(frame.width)))
                         let currentZoom = min(8.0, max(1.0, zoomScale * gestureZoom))
@@ -805,16 +818,27 @@ struct ContentView: View {
                     }
                     .frame(height: CGFloat(frame.height) * min(8, UIScreen.main.bounds.width / CGFloat(frame.width)))
                     .overlay(alignment: .bottom) {
-                        // Static colorbar (not affected by zoom/pan)
-                        if !showBadData {
+                        // Static colorbar (not affected by zoom/pan) — tap to toggle
+                        if showColorbar && !showBadData {
                             if let param = phenologyDisplayParam, param.isFraction {
                                 FractionColorBar(label: param.rawValue)
                                     .padding(.horizontal, 4)
                                     .padding(.bottom, 2)
+                                    .onTapGesture { showColorbar = false }
                             } else if phenologyDisplayParam == nil && settings.displayMode == .ndvi {
                                 NDVIColorBarCompact()
                                     .padding(.horizontal, 4)
                                     .padding(.bottom, 2)
+                                    .onTapGesture { showColorbar = false }
+                            }
+                        } else if !showColorbar {
+                            Button {
+                                showColorbar = true
+                            } label: {
+                                Image(systemName: "paintpalette")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .padding(6)
                             }
                         }
                     }
@@ -850,12 +874,22 @@ struct ContentView: View {
                         }
                         .font(.system(size: 9).monospacedDigit())
                     }
+                    } // end if showMovie
                 }
             }
 
             // NDVI time series chart — synced with animation
             if processor.frames.count > 1 {
-                ndviChart
+                if showChart {
+                    ndviChart
+                } else {
+                    Button {
+                        withAnimation(.easeInOut(duration: 0.2)) { showChart = true }
+                    } label: {
+                        Label("Time Series", systemImage: "chart.xyaxis.line")
+                            .font(.caption)
+                    }
+                }
                 spectralChart
                 phenologySection
             }
@@ -1007,6 +1041,14 @@ struct ContentView: View {
                 Text("Valid")
                     .font(.caption.bold())
                     .foregroundStyle(.blue)
+                Button {
+                    withAnimation(.easeInOut(duration: 0.2)) { showChart = false }
+                } label: {
+                    Image(systemName: "chevron.up")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .frame(width: 28, height: 28)
+                }
             }
 
             let sorted = processor.frames.sorted(by: { $0.date < $1.date })
@@ -1241,6 +1283,28 @@ struct ContentView: View {
                             )
                             .foregroundStyle(soilBrown.opacity(0.5))
                             .lineStyle(StrokeStyle(lineWidth: 1.5, dash: [6, 3]))
+                        }
+                    }
+                    // Fraction data point dots
+                    ForEach(validSorted) { frame in
+                        if let fv = medianFraction(for: frame, param: .fveg) {
+                            PointMark(x: .value("Date", frame.date), y: .value(viLabel, fv))
+                                .foregroundStyle(.green.opacity(0.7))
+                                .symbolSize(12)
+                        }
+                    }
+                    ForEach(validSorted) { frame in
+                        if let fn = medianFraction(for: frame, param: .fnpv) {
+                            PointMark(x: .value("Date", frame.date), y: .value(viLabel, fn))
+                                .foregroundStyle(.yellow.opacity(0.7))
+                                .symbolSize(12)
+                        }
+                    }
+                    ForEach(validSorted) { frame in
+                        if let fs = medianFraction(for: frame, param: .fsoil) {
+                            PointMark(x: .value("Date", frame.date), y: .value(viLabel, fs))
+                                .foregroundStyle(soilBrown.opacity(0.7))
+                                .symbolSize(12)
                         }
                     }
                 }
@@ -1682,9 +1746,9 @@ struct ContentView: View {
                 "Low": Color.blue.opacity(0.7),
                 "Median": Color.gray,
                 "Predicted": Color.purple.opacity(0.8),
-                "GV scaled": Color.green.opacity(0.5),
-                "NPV scaled": Color.yellow.opacity(0.5),
-                "Soil scaled": soilBrown.opacity(0.5)
+                "GV scaled": Color.green.opacity(0.7),
+                "NPV scaled": Color.yellow.opacity(0.7),
+                "Soil scaled": soilBrown.opacity(0.7)
             ]
         }
 
@@ -1710,8 +1774,8 @@ struct ContentView: View {
                 )
                 .foregroundStyle(by: .value("Series", pt.series))
                 .lineStyle(StrokeStyle(
-                    lineWidth: pt.series == "Current" ? 2.5 : (isEndmember(pt.series) ? 1.0 : 1.5),
-                    dash: pt.series == "Current" ? [] : [4, 2]))
+                    lineWidth: pt.series == "Current" ? 2.5 : (isEndmember(pt.series) || pt.series == "Predicted" ? 2.0 : 1.5),
+                    dash: pt.series == "Current" ? [] : (isEndmember(pt.series) ? [3, 1] : [4, 2])))
                 .interpolationMethod(.catmullRom)
             }
             // Point marks (only for non-endmember series)
@@ -1860,22 +1924,23 @@ struct ContentView: View {
 
         // Fraction model curves (fSoil single decreasing logistic, fNPV single increasing logistic)
         // Soil: 1→0 at SOS (rate=rsp), NPV: 0→1 at EOS (rate=rau)
-        if let dl = dlBest, !frameUnmixResults.isEmpty, !isInspectingPixel {
+        if let dl = dlBest, !frameUnmixResults.isEmpty {
+            let ghost = isInspectingPixel
             for cdoy in cdoys {
                 if let d = dateForCDOY(cdoy) {
                     pts.append(DLCurvePoint(
                         id: "fsoil_\(cdoy)", date: d,
                         ndvi: dl.evaluateSoilFraction(t: Double(cdoy)),
                         series: "fSoil-fit",
-                        color: soilBrown.opacity(0.7),
-                        style: StrokeStyle(lineWidth: 2)
+                        color: soilBrown.opacity(ghost ? 0.3 : 0.7),
+                        style: StrokeStyle(lineWidth: ghost ? 1 : 2)
                     ))
                     pts.append(DLCurvePoint(
                         id: "fnpv_\(cdoy)", date: d,
                         ndvi: dl.evaluateNPVFraction(t: Double(cdoy)),
                         series: "fNPV-fit",
-                        color: .yellow.opacity(0.7),
-                        style: StrokeStyle(lineWidth: 2)
+                        color: .yellow.opacity(ghost ? 0.3 : 0.7),
+                        style: StrokeStyle(lineWidth: ghost ? 1 : 2)
                     ))
                 }
             }
@@ -2143,6 +2208,7 @@ struct ContentView: View {
         inspectedPixelCol = col
         if !isInspectingPixel {
             isInspectingPixel = true
+            stopPlayback()
             let generator = UIImpactFeedbackGenerator(style: .medium)
             generator.impactOccurred()
         }

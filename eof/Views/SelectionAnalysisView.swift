@@ -86,15 +86,21 @@ struct SelectionAnalysisView: View {
             var sum: Double = 0, count = 0
             if useFVC, let ur = unmixResults[frame.id] {
                 // Use fVeg from unmixing
-                for row in rMin...min(rMax, ur.height - 1) {
-                    for col in cMin...min(cMax, ur.width - 1) {
+                let r0 = max(0, rMin), r1 = min(rMax, ur.height - 1)
+                let c0 = max(0, cMin), c1 = min(cMax, ur.width - 1)
+                guard r0 <= r1, c0 <= c1 else { return nil }
+                for row in r0...r1 {
+                    for col in c0...c1 {
                         let v = ur.fveg[row][col]
                         if !v.isNaN { sum += Double(v); count += 1 }
                     }
                 }
             } else {
-                for row in rMin...min(rMax, frame.height - 1) {
-                    for col in cMin...min(cMax, frame.width - 1) {
+                let r0 = max(0, rMin), r1 = min(rMax, frame.height - 1)
+                let c0 = max(0, cMin), c1 = min(cMax, frame.width - 1)
+                guard r0 <= r1, c0 <= c1 else { return nil }
+                for row in r0...r1 {
+                    for col in c0...c1 {
                         let v = frame.ndvi[row][col]
                         if !v.isNaN { sum += Double(v); count += 1 }
                     }
@@ -150,8 +156,11 @@ struct SelectionAnalysisView: View {
         for frame in sorted {
             var rSum = 0.0, nSum = 0.0, gSum = 0.0, bSum = 0.0
             var count = 0, gCount = 0, bCount = 0
-            for row in rMin...min(rMax, frame.height - 1) {
-                for col in cMin...min(cMax, frame.width - 1) {
+            let r0 = max(0, rMin), r1 = min(rMax, frame.height - 1)
+            let c0 = max(0, cMin), c1 = min(cMax, frame.width - 1)
+            guard r0 <= r1, c0 <= c1 else { continue }
+            for row in r0...r1 {
+                for col in c0...c1 {
                     let ndvi = frame.ndvi[row][col]
                     guard !ndvi.isNaN else { continue }
                     let ofs = Double(frame.dnOffset)
@@ -198,9 +207,9 @@ struct SelectionAnalysisView: View {
         } ?? 0
 
         var phenoGood = 0, phenoPoor = 0, phenoOutlier = 0
-        if let pp = pixelPhenology {
-            for row in minRow...min(maxRow, pp.height - 1) {
-                for col in minCol...min(maxCol, pp.width - 1) {
+        if let pp = pixelPhenology, minRow <= pp.height - 1, minCol <= pp.width - 1 {
+            for row in max(0, minRow)...min(maxRow, pp.height - 1) {
+                for col in max(0, minCol)...min(maxCol, pp.width - 1) {
                     guard let px = pp.pixels[row][col] else { continue }
                     switch px.fitQuality {
                     case .good: phenoGood += 1
@@ -380,8 +389,11 @@ struct SelectionAnalysisView: View {
         guard let pp = pixelPhenology else { return AnyView(EmptyView()) }
 
         var goodParams: [DLParams] = []
-        for row in minRow...min(maxRow, pp.height - 1) {
-            for col in minCol...min(maxCol, pp.width - 1) {
+        guard minRow <= pp.height - 1, minCol <= pp.width - 1 else {
+            return AnyView(EmptyView())
+        }
+        for row in max(0, minRow)...min(maxRow, pp.height - 1) {
+            for col in max(0, minCol)...min(maxCol, pp.width - 1) {
                 if let px = pp.pixels[row][col], px.fitQuality == .good {
                     goodParams.append(px.params)
                 }
