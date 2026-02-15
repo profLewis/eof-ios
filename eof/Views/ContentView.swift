@@ -825,11 +825,21 @@ struct ContentView: View {
                                     .padding(.horizontal, 4)
                                     .padding(.bottom, 2)
                                     .onTapGesture { showColorbar = false }
-                            } else if phenologyDisplayParam == nil && settings.displayMode == .ndvi {
-                                NDVIColorBarCompact()
-                                    .padding(.horizontal, 4)
-                                    .padding(.bottom, 2)
-                                    .onTapGesture { showColorbar = false }
+                            } else if phenologyDisplayParam == nil {
+                                switch settings.displayMode {
+                                case .ndvi:
+                                    NDVIColorBarCompact()
+                                        .padding(.horizontal, 4)
+                                        .padding(.bottom, 2)
+                                        .onTapGesture { showColorbar = false }
+                                case .bandRed, .bandNIR, .bandGreen, .bandBlue:
+                                    BandColorBar(label: chartLabel)
+                                        .padding(.horizontal, 4)
+                                        .padding(.bottom, 2)
+                                        .onTapGesture { showColorbar = false }
+                                default:
+                                    EmptyView()
+                                }
                             }
                         } else if !showColorbar {
                             Button {
@@ -974,6 +984,26 @@ struct ContentView: View {
     /// Whether the chart should display fVeg values (when VI is FVC and unmix results exist).
     private var chartShowsFveg: Bool {
         settings.vegetationIndex == .fvc && !frameUnmixResults.isEmpty
+    }
+
+    /// Dynamic y-axis domain based on what's being charted.
+    private var chartYDomain: ClosedRange<Double> {
+        switch settings.displayMode {
+        case .bandRed, .bandNIR, .bandGreen, .bandBlue:
+            return 0.0...0.55  // reflectance range
+        default:
+            return chartShowsFveg ? 0.0...1.05 : -0.25...1.05
+        }
+    }
+
+    /// Dynamic y-axis tick values.
+    private var chartYAxisValues: [Double] {
+        switch settings.displayMode {
+        case .bandRed, .bandNIR, .bandGreen, .bandBlue:
+            return [0, 0.1, 0.2, 0.3, 0.4, 0.5]
+        default:
+            return chartShowsFveg ? [0, 0.25, 0.5, 0.75, 1.0] : [-0.2, 0, 0.25, 0.5, 0.75, 1.0]
+        }
     }
 
     /// Get the chart y-value for a frame depending on display mode.
@@ -1310,7 +1340,7 @@ struct ContentView: View {
                 }
             }
             .chartYAxis {
-                AxisMarks(values: [-0.2, 0, 0.25, 0.5, 0.75, 1.0])
+                AxisMarks(values: chartYAxisValues)
             }
             .chartXAxis {
                 AxisMarks(values: .automatic) { value in
@@ -1329,7 +1359,7 @@ struct ContentView: View {
                     }
                 }
             }
-            .chartYScale(domain: -0.25...1.05)
+            .chartYScale(domain: chartYDomain)
             .frame(height: 140)
             .contentShape(Rectangle())
             .gesture(
@@ -2136,9 +2166,49 @@ struct ContentView: View {
         }
     }
 
-    /// Average NDVI over the NxN inspect window for a single frame.
+    /// Average value over the NxN inspect window for a single frame, matching current display mode.
     private func pixelValue(row: Int, col: Int, frame: NDVIFrame) -> Double? {
         let half = (settings.pixelInspectWindow - 1) / 2
+        // For FVC mode, read from unmix results
+        if chartShowsFveg, let ur = frameUnmixResults[frame.id] {
+            var values = [Float]()
+            for dr in -half...half {
+                for dc in -half...half {
+                    let r = row + dr, c = col + dc
+                    guard r >= 0, r < ur.height, c >= 0, c < ur.width else { continue }
+                    let v = ur.fveg[r][c]
+                    if !v.isNaN { values.append(v) }
+                }
+            }
+            guard !values.isEmpty else { return nil }
+            return Double(values.reduce(0, +)) / Double(values.count)
+        }
+        // For band modes, read raw reflectance
+        let bandData: [[UInt16]]?
+        switch settings.displayMode {
+        case .bandRed: bandData = frame.redBand
+        case .bandNIR: bandData = frame.nirBand
+        case .bandGreen: bandData = frame.greenBand
+        case .bandBlue: bandData = frame.blueBand
+        default: bandData = nil
+        }
+        if let band = bandData {
+            let ofs = frame.dnOffset
+            var values = [Float]()
+            for dr in -half...half {
+                for dc in -half...half {
+                    let r = row + dr, c = col + dc
+                    guard r >= 0, r < frame.height, c >= 0, c < frame.width,
+                          r < band.count, c < band[r].count else { continue }
+                    let dn = band[r][c]
+                    guard dn > 0, dn < 65535 else { continue }
+                    values.append((Float(dn) + ofs) / 10000.0)
+                }
+            }
+            guard !values.isEmpty else { return nil }
+            return Double(values.reduce(0, +)) / Double(values.count)
+        }
+        // Default: NDVI
         var values = [Float]()
         for dr in -half...half {
             for dc in -half...half {
@@ -3539,6 +3609,35 @@ struct FractionColorBar: View {
                 context.draw(r, at: CGPoint(x: x, y: size.height / 2))
             }
             let lbl = Text(label).font(.system(size: 7).bold()).foregroundStyle(.white)
+            let lr = context.resolve(lbl)
+            context.draw(lr, at: CGPoint(x: size.width / 2, y: size.height / 2))
+        }
+        .frame(height: 12)
+        .clipShape(RoundedRectangle(cornerRadius: 3))
+        .opacity(0.85)
+        .padding(.horizontal, 4)
+    }
+}
+
+/// Grayscale colorbar for single-band reflectance display (0–0.5).
+struct BandColorBar: View {
+    let label: String
+    var body: some View {
+        Canvas { context, size in
+            for i in 0..<Int(size.width) {
+                let frac = Float(i) / Float(size.width)
+                let v = UInt8(min(255, frac * 510))  // 0 to 0.5 → 0 to 255
+                context.fill(Path(CGRect(x: CGFloat(i), y: 0, width: 1, height: size.height)),
+                             with: .color(Color(red: Double(v)/255, green: Double(v)/255, blue: Double(v)/255)))
+            }
+            let ticks: [(Float, String)] = [(0, "0"), (0.1, ".1"), (0.2, ".2"), (0.3, ".3"), (0.4, ".4"), (0.5, ".5")]
+            for (val, lbl) in ticks {
+                let x = CGFloat(val / 0.5) * size.width
+                let text = Text(lbl).font(.system(size: 7).monospacedDigit()).foregroundStyle(.cyan)
+                let r = context.resolve(text)
+                context.draw(r, at: CGPoint(x: x, y: size.height / 2))
+            }
+            let lbl = Text(label).font(.system(size: 7).bold()).foregroundStyle(.cyan)
             let lr = context.resolve(lbl)
             context.draw(lr, at: CGPoint(x: size.width / 2, y: size.height / 2))
         }
