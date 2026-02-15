@@ -76,7 +76,7 @@ class AppSettings {
     /// Max % difference between green-up (rsp) and senescence (rau) rates. 0 = no constraint.
     var slopeSymmetry: Int = 20 { didSet { save() } }
     /// Second pass: refit with weights from first-pass DL curve.
-    var enableSecondPass: Bool = false { didSet { save() } }
+    var enableSecondPass: Bool = true { didSet { save() } }
     /// Second pass weight range: min weight (off-season) and max weight (peak season).
     var secondPassWeightMin: Double = 1.0 { didSet { save() } }
     var secondPassWeightMax: Double = 2.0 { didSet { save() } }
@@ -101,7 +101,7 @@ class AppSettings {
 
     // Spectral unmixing
     var enableSpectralUnmixing: Bool = false { didSet { save() } }
-    var showFractionTimeSeries: Bool = false { didSet { save() } }
+    var showFractionTimeSeries: Bool = true { didSet { save() } }
 
     enum DLFitTarget: String, CaseIterable {
         case vi = "VI"

@@ -801,10 +801,16 @@ struct ContentView: View {
                     .frame(height: CGFloat(frame.height) * min(8, UIScreen.main.bounds.width / CGFloat(frame.width)))
                     .overlay(alignment: .bottom) {
                         // Static colorbar (not affected by zoom/pan)
-                        if phenologyDisplayParam == nil && !showBadData && settings.displayMode == .ndvi {
-                            NDVIColorBarCompact()
-                                .padding(.horizontal, 4)
-                                .padding(.bottom, 2)
+                        if !showBadData {
+                            if let param = phenologyDisplayParam, param.isFraction {
+                                FractionColorBar(label: param.rawValue)
+                                    .padding(.horizontal, 4)
+                                    .padding(.bottom, 2)
+                            } else if phenologyDisplayParam == nil && settings.displayMode == .ndvi {
+                                NDVIColorBarCompact()
+                                    .padding(.horizontal, 4)
+                                    .padding(.bottom, 2)
+                            }
                         }
                     }
 
@@ -1618,24 +1624,41 @@ struct ContentView: View {
             }
             hasUnmix = true
             let endmembers = EndmemberLibrary.defaults
-            let allBands = EndmemberLibrary.allBands
-
-            // Endmember reference spectra (full wavelength range)
-            for em in endmembers {
-                for v in em.values {
-                    pts.append(SpectralPt(id: "em_\(em.name)_\(v.band)", nm: v.nm, refl: v.reflectance,
-                                          series: em.name, band: v.band))
-                }
-            }
 
             if let f = fracs {
-                // Predicted spectrum at full wavelength range
-                let predicted = SpectralUnmixing.predict(
-                    fractions: f, endmembers: endmembers, bands: allBands)
-                for p in predicted {
-                    let band = allBands.first(where: { $0.nm == p.nm })?.band ?? ""
-                    pts.append(SpectralPt(id: "pred_\(band)", nm: p.nm, refl: p.refl,
-                                          series: "Predicted", band: band))
+                // Interpolate endmember spectra at 5nm resolution, scaled by fractions
+                let fractionValues: [Float] = [f.fveg, f.fnpv, f.fsoil]
+                let seriesNames = ["GV scaled", "NPV scaled", "Soil scaled"]
+                for (ei, em) in endmembers.enumerated() {
+                    let frac = Double(fractionValues[ei])
+                    guard frac > 0.01 else { continue }
+                    let emVals = em.values.sorted(by: { $0.nm < $1.nm })
+                    let nms = emVals.map(\.nm)
+                    let refls = emVals.map(\.reflectance)
+                    // Interpolate at 5nm from first to last wavelength
+                    var nm = nms.first!
+                    while nm <= nms.last! {
+                        let refl = linearInterpolate(x: nm, xs: nms, ys: refls)
+                        pts.append(SpectralPt(id: "\(seriesNames[ei])_\(Int(nm))", nm: nm,
+                                              refl: refl * frac,
+                                              series: seriesNames[ei], band: ""))
+                        nm += 5
+                    }
+                }
+                // Predicted total spectrum at 5nm resolution
+                let emAll = endmembers.map { $0.values.sorted(by: { $0.nm < $1.nm }) }
+                let nms0 = emAll[0].map(\.nm)
+                var nm = nms0.first!
+                while nm <= nms0.last! {
+                    var total = 0.0
+                    for (ei, emVals) in emAll.enumerated() {
+                        let xs = emVals.map(\.nm)
+                        let ys = emVals.map(\.reflectance)
+                        total += Double(fractionValues[ei]) * linearInterpolate(x: nm, xs: xs, ys: ys)
+                    }
+                    pts.append(SpectralPt(id: "pred_\(Int(nm))", nm: nm, refl: total,
+                                          series: "Predicted", band: ""))
+                    nm += 5
                 }
             }
         }
@@ -1653,9 +1676,9 @@ struct ContentView: View {
                 "Low": Color.blue.opacity(0.7),
                 "Median": Color.gray,
                 "Predicted": Color.purple.opacity(0.8),
-                "Green Vegetation": Color.green.opacity(0.4),
-                "NPV (Dry Vegetation)": Color.yellow.opacity(0.4),
-                "Bare Soil": Color.orange.opacity(0.4)
+                "GV scaled": Color.green.opacity(0.5),
+                "NPV scaled": Color.yellow.opacity(0.5),
+                "Soil scaled": Color.orange.opacity(0.5)
             ]
         }
 
@@ -1672,7 +1695,7 @@ struct ContentView: View {
             }
 
             // Line + point marks for each series
-            let isEndmember = { (s: String) in s == "Green Vegetation" || s == "NPV (Dry Vegetation)" || s == "Bare Soil" }
+            let isEndmember = { (s: String) in s == "GV scaled" || s == "NPV scaled" || s == "Soil scaled" }
             ForEach(pts) { pt in
                 LineMark(
                     x: .value("Wavelength (nm)", pt.nm),
@@ -1735,6 +1758,20 @@ struct ContentView: View {
                 .foregroundStyle(.secondary)
                 .offset(y: -2)
         }
+    }
+
+    /// Linear interpolation in a sorted array of (x, y) pairs.
+    private func linearInterpolate(x: Double, xs: [Double], ys: [Double]) -> Double {
+        guard xs.count == ys.count, !xs.isEmpty else { return 0 }
+        if x <= xs.first! { return ys.first! }
+        if x >= xs.last! { return ys.last! }
+        for i in 1..<xs.count {
+            if x <= xs[i] {
+                let t = (x - xs[i-1]) / (xs[i] - xs[i-1])
+                return ys[i-1] + t * (ys[i] - ys[i-1])
+            }
+        }
+        return ys.last!
     }
 
     // MARK: - Double Logistic Curve Data
@@ -3390,5 +3427,43 @@ struct NDVIColorBarCompact: View {
             let t = min(1, (v - 0.7) / 0.3)
             return (UInt8(20 - t * 10), UInt8(150 - t * 40), UInt8(30 - t * 10))
         }
+    }
+}
+
+/// Simple 0–1 fraction colorbar (green gradient for FVC, yellow for NPV, orange for Soil).
+struct FractionColorBar: View {
+    let label: String
+    var body: some View {
+        Canvas { context, size in
+            let color: (Float) -> (UInt8, UInt8, UInt8) = { f in
+                let t = max(0, min(1, f))
+                switch label {
+                case "FVC":  return (UInt8(30 + (1-t) * 90), UInt8(80 + t * 175), UInt8(30 + (1-t) * 40))
+                case "NPV":  return (UInt8(40 + t * 215), UInt8(40 + t * 215), UInt8(20))
+                case "Soil": return (UInt8(40 + t * 215), UInt8(40 + t * 140), UInt8(20))
+                default:     return (UInt8(40 + t * 215), UInt8(40 + t * 215), UInt8(40 + t * 215))
+                }
+            }
+            for i in 0..<Int(size.width) {
+                let frac = Float(i) / Float(size.width)
+                let (r, g, b) = color(frac)
+                context.fill(Path(CGRect(x: CGFloat(i), y: 0, width: 1, height: size.height)),
+                             with: .color(Color(red: Double(r)/255, green: Double(g)/255, blue: Double(b)/255)))
+            }
+            let ticks: [(Float, String)] = [(0, "0"), (0.25, ".25"), (0.5, ".5"), (0.75, ".75"), (1.0, "1")]
+            for (val, lbl) in ticks {
+                let x = CGFloat(val) * size.width
+                let text = Text(lbl).font(.system(size: 7).monospacedDigit()).foregroundStyle(.white)
+                let r = context.resolve(text)
+                context.draw(r, at: CGPoint(x: x, y: size.height / 2))
+            }
+            let lbl = Text(label).font(.system(size: 7).bold()).foregroundStyle(.white)
+            let lr = context.resolve(lbl)
+            context.draw(lr, at: CGPoint(x: size.width / 2, y: size.height / 2))
+        }
+        .frame(height: 12)
+        .clipShape(RoundedRectangle(cornerRadius: 3))
+        .opacity(0.85)
+        .padding(.horizontal, 4)
     }
 }
