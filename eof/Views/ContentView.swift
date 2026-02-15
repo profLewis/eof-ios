@@ -495,9 +495,12 @@ struct ContentView: View {
                         let fitScale = max(1, min(8, geo.size.width / CGFloat(frame.width)))
                         let currentZoom = min(8.0, max(1.0, zoomScale * gestureZoom))
                         let imageH = CGFloat(frame.height) * fitScale
+                        let imageW = CGFloat(frame.width) * fitScale
+                        let xInset = max(0, (geo.size.width - imageW) / 2)
+                        let yInset = max(0, (geo.size.height - imageH) / 2)
 
                         ZStack(alignment: .topLeading) {
-                            // Image layer (transformed)
+                            // Image layer (transformed, centered)
                             NDVIMapView(frame: frame, scale: fitScale, showPolygon: true, showColorBar: true,
                                         displayMode: settings.displayMode,
                                         cloudMask: settings.cloudMask,
@@ -515,15 +518,14 @@ struct ContentView: View {
                                 .opacity(showData ? dataOpacity : 0.0)
                                 .background(alignment: .top) {
                                     if let bm = basemapImage {
-                                        let imgW = CGFloat(frame.width) * fitScale
-                                        let imgH = CGFloat(frame.height) * fitScale
                                         Image(decorative: bm, scale: 1)
                                             .resizable()
                                             .interpolation(.high)
-                                            .frame(width: imgW, height: imgH)
+                                            .frame(width: imageW, height: imageH)
                                             .clipShape(RoundedRectangle(cornerRadius: 8))
                                     }
                                 }
+                                .offset(x: xInset, y: yInset)
                                 .scaleEffect(currentZoom, anchor: .topLeading)
                                 .offset(panOffset)
                                 .allowsHitTesting(false)
@@ -544,8 +546,8 @@ struct ContentView: View {
 
                             // Pixel inspection crosshair
                             if isInspectingPixel {
-                                let cx = (CGFloat(inspectedPixelCol) + 0.5) * fitScale * currentZoom + panOffset.width
-                                let cy = (CGFloat(inspectedPixelRow) + 0.5) * fitScale * currentZoom + panOffset.height
+                                let cx = (CGFloat(inspectedPixelCol) + 0.5) * fitScale * currentZoom + xInset * currentZoom + panOffset.width
+                                let cy = (CGFloat(inspectedPixelRow) + 0.5) * fitScale * currentZoom + yInset * currentZoom + panOffset.height
                                 let w = CGFloat(settings.pixelInspectWindow) * fitScale * currentZoom
                                 Rectangle()
                                     .stroke(.cyan, lineWidth: 2)
@@ -589,7 +591,8 @@ struct ContentView: View {
                                         isInspectingPixel = false
                                         return
                                     }
-                                    let (col, row) = screenToPixel(location, zoom: currentZoom, pan: panOffset, fitScale: fitScale)
+                                    let inset = CGSize(width: xInset, height: yInset)
+                                    let (col, row) = screenToPixel(location, zoom: currentZoom, pan: panOffset, fitScale: fitScale, inset: inset)
                                     if showBadData, let pp = pixelPhenology {
                                         if row >= 0, row < pp.height, col >= 0, col < pp.width,
                                            let px = pp.pixels[row][col] {
@@ -633,7 +636,7 @@ struct ContentView: View {
                                         }
                                         .onEnded { _ in
                                             if isSelectMode {
-                                                finalizeSelectionZoomed(frame: frame, fitScale: fitScale, zoom: currentZoom, pan: panOffset)
+                                                finalizeSelectionZoomed(frame: frame, fitScale: fitScale, zoom: currentZoom, pan: panOffset, inset: CGSize(width: xInset, height: yInset))
                                             } else if currentZoom <= 1.05 {
                                                 dragStartIndex = currentFrameIndex
                                             }
@@ -649,16 +652,18 @@ struct ContentView: View {
                                                 let capturedZoom = currentZoom
                                                 let capturedPan = panOffset
                                                 let capturedScale = fitScale
+                                                let capturedInset = CGSize(width: xInset, height: yInset)
                                                 pixelInspectTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: false) { _ in
                                                     DispatchQueue.main.async {
-                                                        let (col, row) = screenToPixel(startLoc, zoom: capturedZoom, pan: capturedPan, fitScale: capturedScale)
+                                                        let (col, row) = screenToPixel(startLoc, zoom: capturedZoom, pan: capturedPan, fitScale: capturedScale, inset: capturedInset)
                                                         updatePixelInspection(row: row, col: col)
                                                     }
                                                 }
                                             }
                                             // Update pixel position while dragging after inspection started
                                             if isInspectingPixel {
-                                                let (col, row) = screenToPixel(value.location, zoom: currentZoom, pan: panOffset, fitScale: fitScale)
+                                                let capturedInset = CGSize(width: xInset, height: yInset)
+                                                let (col, row) = screenToPixel(value.location, zoom: currentZoom, pan: panOffset, fitScale: fitScale, inset: capturedInset)
                                                 updatePixelInspection(row: row, col: col)
                                             }
                                             // Cancel timer if finger moves too much before it fires
@@ -752,7 +757,7 @@ struct ContentView: View {
                         .onAppear { dragStartIndex = currentFrameIndex }
                         .onChange(of: currentFrameIndex) { dragStartIndex = currentFrameIndex }
                     }
-                    .frame(height: CGFloat(frame.height) * min(8, UIScreen.main.bounds.width / CGFloat(frame.width)) + 30)
+                    .frame(height: CGFloat(frame.height) * min(8, UIScreen.main.bounds.width / CGFloat(frame.width)))
 
                     HStack {
                         Text("Cloud: \(Int(frame.cloudFraction * 100))%")
@@ -2758,17 +2763,17 @@ struct ContentView: View {
 
     /// Convert a screen-space point to image pixel coordinates, accounting for zoom + pan.
     /// The image is rendered at `fitScale` px/pixel, then scaled by `zoom` from top-leading, then offset by `pan`.
-    private func screenToPixel(_ screenPt: CGPoint, zoom: CGFloat, pan: CGSize, fitScale: CGFloat) -> (col: Int, row: Int) {
-        let viewX = (screenPt.x - pan.width) / zoom
-        let viewY = (screenPt.y - pan.height) / zoom
+    private func screenToPixel(_ screenPt: CGPoint, zoom: CGFloat, pan: CGSize, fitScale: CGFloat, inset: CGSize = .zero) -> (col: Int, row: Int) {
+        let viewX = (screenPt.x - pan.width) / zoom - inset.width
+        let viewY = (screenPt.y - pan.height) / zoom - inset.height
         return (col: Int(viewX / fitScale), row: Int(viewY / fitScale))
     }
 
     /// Finalize a drag selection, converting screen-space rectangle to pixel coordinates via zoom+pan transform.
-    private func finalizeSelectionZoomed(frame: NDVIFrame, fitScale: CGFloat, zoom: CGFloat, pan: CGSize) {
+    private func finalizeSelectionZoomed(frame: NDVIFrame, fitScale: CGFloat, zoom: CGFloat, pan: CGSize, inset: CGSize = .zero) {
         guard let s = selectionStart, let e = selectionEnd else { return }
-        let (c0, r0) = screenToPixel(CGPoint(x: min(s.x, e.x), y: min(s.y, e.y)), zoom: zoom, pan: pan, fitScale: fitScale)
-        let (c1, r1) = screenToPixel(CGPoint(x: max(s.x, e.x), y: max(s.y, e.y)), zoom: zoom, pan: pan, fitScale: fitScale)
+        let (c0, r0) = screenToPixel(CGPoint(x: min(s.x, e.x), y: min(s.y, e.y)), zoom: zoom, pan: pan, fitScale: fitScale, inset: inset)
+        let (c1, r1) = screenToPixel(CGPoint(x: max(s.x, e.x), y: max(s.y, e.y)), zoom: zoom, pan: pan, fitScale: fitScale, inset: inset)
         let minCol = max(0, c0), maxCol = min(frame.width - 1, c1)
         let minRow = max(0, r0), maxRow = min(frame.height - 1, r1)
 
