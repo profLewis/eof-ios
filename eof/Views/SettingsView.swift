@@ -40,7 +40,7 @@ struct SettingsView: View {
                     if settings.displayMode == .ndvi {
                         VStack(alignment: .leading, spacing: 8) {
                             HStack {
-                                Text("NDVI Threshold")
+                                Text("\(settings.vegetationIndex.label) Threshold")
                                 Spacer()
                                 Text(String(format: "%.2f", settings.ndviThreshold))
                                     .monospacedDigit()
@@ -48,7 +48,7 @@ struct SettingsView: View {
                             }
                             Slider(value: $settings.ndviThreshold, in: -0.5...1, step: 0.05)
                         }
-                        Text("Pixels below this threshold are shown muted. Negative values include bare soil/water.")
+                        Text("Pixels below this \(settings.vegetationIndex.label) threshold are shown muted. Negative values include bare soil/water.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }

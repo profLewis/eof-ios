@@ -1340,10 +1340,21 @@ struct ContentView: View {
 
                 VStack(alignment: .leading, spacing: 4) {
                     HStack {
-                        Text("Spectral \u{2014} \(current.dateString)")
-                            .font(.caption.bold())
-                            .foregroundStyle(.primary)
+                        let peakFrame = sorted.max(by: { $0.medianNDVI < $1.medianNDVI })
+                        VStack(alignment: .leading, spacing: 0) {
+                            Text("Spectral \u{2014} \(current.dateString)")
+                                .font(.caption.bold())
+                                .foregroundStyle(.primary)
+                            if current.id == peakFrame?.id {
+                                Text("(peak)")
+                                    .font(.system(size: 8))
+                                    .foregroundStyle(.green)
+                            }
+                        }
                         Spacer()
+                        Text("\(sorted.count) dates")
+                            .font(.system(size: 8))
+                            .foregroundStyle(.secondary)
                         Button {
                             showSpectralChart = false
                         } label: {
@@ -1371,7 +1382,6 @@ struct ContentView: View {
     }
 
     private func spectralChartContent(current: NDVIFrame, sorted: [NDVIFrame]) -> some View {
-        // Current frame spectral data
         let usePixel = isInspectingPixel
         let currentVals = spectralValues(
             frame: current,
@@ -1379,7 +1389,6 @@ struct ContentView: View {
             pixelCol: usePixel ? inspectedPixelCol : nil
         )
 
-        // Reference frames: peak NDVI and min NDVI for context
         let peakFrame = sorted.max(by: { $0.medianNDVI < $1.medianNDVI })
         let minFrame = sorted.min(by: { $0.medianNDVI < $1.medianNDVI })
 
@@ -1391,34 +1400,67 @@ struct ContentView: View {
             let band: String
         }
 
+        struct EnvelopePt: Identifiable {
+            let id: String
+            let nm: Double
+            let lo: Double
+            let hi: Double
+        }
+
+        // Per-band statistics across all frames (median, min, max)
+        var envelopePts = [EnvelopePt]()
         var pts = [SpectralPt]()
+        for bw in Self.bandWavelengths {
+            var allRefl = [Double]()
+            for frame in sorted {
+                let sv = spectralValues(frame: frame,
+                                        pixelRow: usePixel ? inspectedPixelRow : nil,
+                                        pixelCol: usePixel ? inspectedPixelCol : nil)
+                if let v = sv.first(where: { $0.band == bw.band }) {
+                    allRefl.append(v.refl)
+                }
+            }
+            if allRefl.count >= 2 {
+                let s = allRefl.sorted()
+                let mid = s.count / 2
+                let median = s.count % 2 == 0 ? (s[mid - 1] + s[mid]) / 2 : s[mid]
+                envelopePts.append(EnvelopePt(id: "env_\(bw.band)", nm: bw.nm,
+                                              lo: s.first!, hi: s.last!))
+                pts.append(SpectralPt(id: "med_\(bw.band)", nm: bw.nm, refl: median,
+                                      series: "Median", band: bw.band))
+            }
+        }
+
+        // Current frame
         for v in currentVals {
             pts.append(SpectralPt(id: "cur_\(v.band)", nm: v.nm, refl: v.refl,
                                   series: "Current", band: v.band))
         }
 
+        // Peak frame
         if let peak = peakFrame, peak.id != current.id {
             let pv = spectralValues(frame: peak,
                                     pixelRow: usePixel ? inspectedPixelRow : nil,
                                     pixelCol: usePixel ? inspectedPixelCol : nil)
             for v in pv {
                 pts.append(SpectralPt(id: "peak_\(v.band)", nm: v.nm, refl: v.refl,
-                                      series: "Peak (\(peak.dateString))", band: v.band))
+                                      series: "Peak", band: v.band))
             }
         }
+
+        // Lowest-NDVI frame
         if let mn = minFrame, mn.id != current.id, mn.id != peakFrame?.id {
             let mv = spectralValues(frame: mn,
                                     pixelRow: usePixel ? inspectedPixelRow : nil,
                                     pixelCol: usePixel ? inspectedPixelCol : nil)
             for v in mv {
-                pts.append(SpectralPt(id: "min_\(v.band)", nm: v.nm, refl: v.refl,
-                                      series: "Min (\(mn.dateString))", band: v.band))
+                pts.append(SpectralPt(id: "low_\(v.band)", nm: v.nm, refl: v.refl,
+                                      series: "Low", band: v.band))
             }
         }
 
-        // Predicted spectrum from unmixing (if available for current frame)
+        // Predicted spectrum from unmixing
         if let unmixResult = frameUnmixResults[current.id] {
-            // Get median fractions for the frame (or single pixel)
             let fracs: UnmixResult?
             if usePixel, inspectedPixelRow < unmixResult.height, inspectedPixelCol < unmixResult.width {
                 let fv = unmixResult.fveg[inspectedPixelRow][inspectedPixelCol]
@@ -1446,38 +1488,63 @@ struct ContentView: View {
             }
         }
 
-        return Chart(pts) { pt in
-            LineMark(
-                x: .value("Wavelength (nm)", pt.nm),
-                y: .value("Reflectance", pt.refl),
-                series: .value("Date", pt.series)
-            )
-            .foregroundStyle(by: .value("Date", pt.series))
-            .lineStyle(StrokeStyle(lineWidth: pt.series == "Current" ? 2.5 : 1.5,
-                                   dash: pt.series == "Current" ? [] : [4, 2]))
+        // Dynamic Y scale
+        let maxRefl = max(0.5, (envelopePts.map(\.hi) + pts.map(\.refl)).max() ?? 0.5)
+        let yTop = ceil(maxRefl * 10) / 10  // round up to nearest 0.1
 
-            PointMark(
-                x: .value("Wavelength (nm)", pt.nm),
-                y: .value("Reflectance", pt.refl)
-            )
-            .foregroundStyle(by: .value("Date", pt.series))
-            .symbolSize(pt.series == "Current" ? 40 : 20)
-            .annotation(position: .top, spacing: 2) {
-                if pt.series == "Current" {
-                    Text(pt.band)
-                        .font(.system(size: 7))
-                        .foregroundStyle(.secondary)
+        // Build color map
+        var colorMap: KeyValuePairs<String, Color> {
+            [
+                "Current": Color.red,
+                "Peak": Color.green.opacity(0.7),
+                "Low": Color.blue.opacity(0.7),
+                "Median": Color.gray,
+                "Predicted": Color.purple.opacity(0.8)
+            ]
+        }
+
+        return Chart {
+            // Envelope: min/max range across all frames
+            ForEach(envelopePts) { env in
+                AreaMark(
+                    x: .value("Wavelength (nm)", env.nm),
+                    yStart: .value("lo", env.lo),
+                    yEnd: .value("hi", env.hi)
+                )
+                .foregroundStyle(Color.gray.opacity(0.12))
+                .interpolationMethod(.catmullRom)
+            }
+
+            // Line + point marks for each series
+            ForEach(pts) { pt in
+                LineMark(
+                    x: .value("Wavelength (nm)", pt.nm),
+                    y: .value("Reflectance", pt.refl),
+                    series: .value("Series", pt.series)
+                )
+                .foregroundStyle(by: .value("Series", pt.series))
+                .lineStyle(StrokeStyle(
+                    lineWidth: pt.series == "Current" ? 2.5 : 1.5,
+                    dash: pt.series == "Current" ? [] : [4, 2]))
+
+                PointMark(
+                    x: .value("Wavelength (nm)", pt.nm),
+                    y: .value("Reflectance", pt.refl)
+                )
+                .foregroundStyle(by: .value("Series", pt.series))
+                .symbolSize(pt.series == "Current" ? 40 : (pt.series == "Median" ? 10 : 20))
+                .annotation(position: .top, spacing: 2) {
+                    if pt.series == "Current" {
+                        Text(pt.band)
+                            .font(.system(size: 7))
+                            .foregroundStyle(.secondary)
+                    }
                 }
             }
         }
-        .chartForegroundStyleScale([
-            "Current": Color.red,
-            "Peak (\(peakFrame?.dateString ?? ""))": Color.green.opacity(0.7),
-            "Min (\(minFrame?.dateString ?? ""))": Color.blue.opacity(0.7),
-            "Predicted": Color.purple.opacity(0.8)
-        ])
+        .chartForegroundStyleScale(colorMap)
         .chartXScale(domain: 400...900)
-        .chartYScale(domain: 0...0.6)
+        .chartYScale(domain: 0...yTop)
         .chartXAxis {
             AxisMarks(values: [450, 500, 560, 665, 750, 842]) { value in
                 AxisGridLine()
@@ -1490,7 +1557,7 @@ struct ContentView: View {
             }
         }
         .chartYAxis {
-            AxisMarks(values: .automatic(desiredCount: 4)) { value in
+            AxisMarks(values: .automatic(desiredCount: 5)) { value in
                 AxisGridLine()
                 AxisValueLabel {
                     if let v = value.as(Double.self) {
@@ -1501,7 +1568,7 @@ struct ContentView: View {
             }
         }
         .chartLegend(.visible)
-        .frame(height: 120)
+        .frame(height: 160)
         .overlay(alignment: .bottom) {
             Text("Wavelength (nm)")
                 .font(.system(size: 7))

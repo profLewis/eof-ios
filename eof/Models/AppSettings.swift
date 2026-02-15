@@ -51,7 +51,7 @@ class AppSettings {
     var displayMode: DisplayMode = .fcc { didSet { save() } }
     var cloudMask: Bool = true { didSet { save() } }
     var cloudThreshold: Double = 100 { didSet { save() } }
-    var ndviThreshold: Float = 0.2 { didSet { save() } }
+    var ndviThreshold: Float = -0.5 { didSet { save() } }
     var showHelp: Bool = false
     var maxConcurrent: Int = 8 { didSet { save() } }
     var showSCLBoundaries: Bool = false { didSet { save() } }
