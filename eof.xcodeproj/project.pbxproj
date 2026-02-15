@@ -49,6 +49,7 @@
 		D4E5F6A7B8C9D0E1F2A3B4C5 /* NetworkMonitor.swift in Sources */ = {isa = PBXBuildFile; fileRef = C3D4E5F6A7B8C9D0E1F2A3B4 /* NetworkMonitor.swift */; };
 		F2E1D0C9A8B7C6D5E4F3A2B1 /* SpectralUnmixing.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C4D5E6F7A8B9C0D1E2F /* SpectralUnmixing.swift */; };
 		DD0F00000000000000000004 /* ParameterBoundsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DD0F00000000000000000003 /* ParameterBoundsView.swift */; };
+		EE0F00000000000000000002 /* HelpView.swift in Sources */ = {isa = PBXBuildFile; fileRef = EE0F00000000000000000001 /* HelpView.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -95,6 +96,7 @@
 		C3D4E5F6A7B8C9D0E1F2A3B4 /* NetworkMonitor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NetworkMonitor.swift; sourceTree = "<group>"; };
 		1A2B3C4D5E6F7A8B9C0D1E2F /* SpectralUnmixing.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpectralUnmixing.swift; sourceTree = "<group>"; };
 		DD0F00000000000000000003 /* ParameterBoundsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ParameterBoundsView.swift; sourceTree = "<group>"; };
+		EE0F00000000000000000001 /* HelpView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HelpView.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -185,6 +187,7 @@
 				BB0F00000000000000000003 /* SelectionAnalysisView.swift */,
 				CC0F00000000000000000001 /* SourceComparisonView.swift */,
 				DD0F00000000000000000003 /* ParameterBoundsView.swift */,
+				EE0F00000000000000000001 /* HelpView.swift */,
 			);
 			path = Views;
 			sourceTree = "<group>";
@@ -315,6 +318,7 @@
 				D4E5F6A7B8C9D0E1F2A3B4C5 /* NetworkMonitor.swift in Sources */,
 				F2E1D0C9A8B7C6D5E4F3A2B1 /* SpectralUnmixing.swift in Sources */,
 				DD0F00000000000000000004 /* ParameterBoundsView.swift in Sources */,
+				EE0F00000000000000000002 /* HelpView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

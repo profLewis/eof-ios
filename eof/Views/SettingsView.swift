@@ -11,6 +11,7 @@ struct SettingsView: View {
     @State private var showingDataSources = false
     @State private var showingSCLMask = false
     @State private var showingParameterBounds = false
+    @State private var showingHelp = false
 
     var body: some View {
         NavigationStack {
@@ -370,6 +371,11 @@ struct SettingsView: View {
 
                 Section {
                     Button {
+                        showingHelp = true
+                    } label: {
+                        Label("Help & Documentation", systemImage: "questionmark.circle")
+                    }
+                    Button {
                         showingAbout = true
                     } label: {
                         Label("About eof", systemImage: "info.circle")
@@ -414,6 +420,10 @@ struct SettingsView: View {
             }
             .sheet(isPresented: $showingSCLMask) {
                 SCLMaskView(isPresented: $showingSCLMask)
+                    .presentationDetents([.large])
+            }
+            .sheet(isPresented: $showingHelp) {
+                HelpView(isPresented: $showingHelp)
                     .presentationDetents([.large])
             }
         }
