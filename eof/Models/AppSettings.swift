@@ -54,7 +54,7 @@ class AppSettings {
     var ndviThreshold: Float = 0.2 { didSet { save() } }
     var showHelp: Bool = false
     var maxConcurrent: Int = 8 { didSet { save() } }
-    var showSCLBoundaries: Bool = true { didSet { save() } }
+    var showSCLBoundaries: Bool = false { didSet { save() } }
     var showSaturationMarkers: Bool = false { didSet { save() } }
     var playbackSpeed: Double = 1.0 { didSet { save() } }
     var enforceAOI: Bool = true { didSet { save() } }
@@ -93,6 +93,16 @@ class AppSettings {
 
     // Crop calendar
     var selectedCrop: String = "" { didSet { save() } }
+
+    // Spectral unmixing
+    var enableSpectralUnmixing: Bool = false { didSet { save() } }
+    var showFractionTimeSeries: Bool = false { didSet { save() } }
+
+    enum DLFitTarget: String, CaseIterable {
+        case vi = "VI"
+        case fveg = "Vegetation Fraction"
+    }
+    var dlFitTarget: DLFitTarget = .vi { didSet { save() } }
 
     // Pixel inspection
     var pixelInspectWindow: Int = 1 { didSet { save() } }
@@ -235,6 +245,9 @@ class AppSettings {
         defaults.set(secondPassWeightMin, forKey: prefix + "secondPassWeightMin")
         defaults.set(secondPassWeightMax, forKey: prefix + "secondPassWeightMax")
         defaults.set(vegetationIndex.rawValue, forKey: prefix + "vegetationIndex")
+        defaults.set(enableSpectralUnmixing, forKey: prefix + "enableSpectralUnmixing")
+        defaults.set(showFractionTimeSeries, forKey: prefix + "showFractionTimeSeries")
+        defaults.set(dlFitTarget.rawValue, forKey: prefix + "dlFitTarget")
         defaults.set(smartAllocation, forKey: prefix + "smartAllocation")
         defaults.set(boundMnMin, forKey: prefix + "boundMnMin")
         defaults.set(boundMnMax, forKey: prefix + "boundMnMax")
@@ -270,7 +283,9 @@ class AppSettings {
         ndviThreshold = Float(defaults.double(forKey: prefix + "ndviThreshold"))
         let mc = defaults.integer(forKey: prefix + "maxConcurrent")
         maxConcurrent = mc > 0 ? mc : 8
-        showSCLBoundaries = defaults.bool(forKey: prefix + "showSCLBoundaries")
+        if defaults.object(forKey: prefix + "showSCLBoundaries") != nil {
+            showSCLBoundaries = defaults.bool(forKey: prefix + "showSCLBoundaries")
+        }
         showSaturationMarkers = defaults.bool(forKey: prefix + "showSaturationMarkers")
         let speed = defaults.double(forKey: prefix + "playbackSpeed")
         playbackSpeed = speed > 0 ? speed : 1.0
@@ -281,7 +296,9 @@ class AppSettings {
         if defaults.object(forKey: prefix + "showMaskedClassColors") != nil {
             showMaskedClassColors = defaults.bool(forKey: prefix + "showMaskedClassColors")
         }
-        showBasemap = defaults.bool(forKey: prefix + "showBasemap")
+        if defaults.object(forKey: prefix + "showBasemap") != nil {
+            showBasemap = defaults.bool(forKey: prefix + "showBasemap")
+        }
         if let arr = defaults.array(forKey: prefix + "sclValidClasses") as? [Int] {
             sclValidClasses = Set(arr)
         }
@@ -320,6 +337,16 @@ class AppSettings {
         }
         if defaults.object(forKey: prefix + "smartAllocation") != nil {
             smartAllocation = defaults.bool(forKey: prefix + "smartAllocation")
+        }
+        if defaults.object(forKey: prefix + "enableSpectralUnmixing") != nil {
+            enableSpectralUnmixing = defaults.bool(forKey: prefix + "enableSpectralUnmixing")
+        }
+        if defaults.object(forKey: prefix + "showFractionTimeSeries") != nil {
+            showFractionTimeSeries = defaults.bool(forKey: prefix + "showFractionTimeSeries")
+        }
+        if let ftRaw = defaults.string(forKey: prefix + "dlFitTarget"),
+           let ft = DLFitTarget(rawValue: ftRaw) {
+            dlFitTarget = ft
         }
         // Parameter bounds
         if defaults.object(forKey: prefix + "boundMnMin") != nil {

@@ -146,6 +146,25 @@ struct SettingsView: View {
                         .foregroundStyle(.secondary)
                 }
 
+                Section("Spectral Unmixing") {
+                    Toggle("Enable Spectral Unmixing", isOn: $settings.enableSpectralUnmixing)
+                    Text("Linear mixture model: refl = a\u{00D7}GV + b\u{00D7}NPV + c\u{00D7}Soil")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    if settings.enableSpectralUnmixing {
+                        Toggle("Show Fraction Time Series", isOn: $settings.showFractionTimeSeries)
+                        Picker("DL Fit Target", selection: $settings.dlFitTarget) {
+                            ForEach(AppSettings.DLFitTarget.allCases, id: \.self) { t in
+                                Text(t.rawValue).tag(t)
+                            }
+                        }
+                        .pickerStyle(.segmented)
+                        Text("Fit double logistic to VI values or green vegetation fraction (fveg).")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
                 Section("Filters") {
                     Toggle("Enforce AOI Polygon", isOn: $settings.enforceAOI)
                     if settings.enforceAOI {

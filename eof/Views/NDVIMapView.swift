@@ -257,9 +257,11 @@ struct NDVIMapView: View {
         }
         guard minV < maxV else { return nil }
 
-        // Clamp peak NDVI and min NDVI display ranges
+        // Clamp display ranges per parameter type
         if param == .delta { maxV = min(maxV, 1.0); minV = max(minV, 0.0) }
         if param == .mn { maxV = min(maxV, 1.0); minV = max(minV, -0.5) }
+        // Fraction maps: fixed 0-1 range
+        if param == .fveg || param == .fnpv || param == .fsoil { minV = 0; maxV = 1 }
 
         var pixels = [UInt32](repeating: 0, count: width * height)
         for row in 0..<height {
@@ -298,6 +300,24 @@ struct NDVIMapView: View {
             return (255, UInt8((1 - t) * 220), UInt8((1 - t) * 50))
         case .rmse:
             // Green → Yellow → Red (good to poor)
+            if t < 0.5 {
+                let s = t * 2
+                return (UInt8(s * 255), UInt8(200 + s * 55), 0)
+            } else {
+                let s = (t - 0.5) * 2
+                return (255, UInt8((1 - s) * 255), 0)
+            }
+        case .fveg:
+            // Brown → Green (vegetation cover: 0 = bare, 1 = full canopy)
+            return (UInt8((1 - t) * 160 + t * 20), UInt8(60 + t * 195), UInt8((1 - t) * 40))
+        case .fnpv:
+            // Pale yellow → Dark brown (dry vegetation / litter)
+            return (UInt8(200 - t * 60), UInt8(180 - t * 100), UInt8(100 - t * 80))
+        case .fsoil:
+            // Light tan → Dark brown (bare soil fraction)
+            return (UInt8(230 - t * 100), UInt8(200 - t * 120), UInt8(150 - t * 130))
+        case .unmixRMSE:
+            // Green → Yellow → Red (same as phenology RMSE)
             if t < 0.5 {
                 let s = t * 2
                 return (UInt8(s * 255), UInt8(200 + s * 55), 0)

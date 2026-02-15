@@ -334,6 +334,32 @@ enum PhenologyParameter: String, CaseIterable {
     case rsp = "Green-up"
     case rau = "Senescence"
     case rmse = "RMSE"
+    // Spectral unmixing fraction maps (per-frame, animated)
+    case fveg = "FVC"
+    case fnpv = "NPV"
+    case fsoil = "Soil"
+    case unmixRMSE = "Unmix RMSE"
+
+    /// True for phenology params derived from DL fit (static per-pixel maps).
+    var isPhenology: Bool {
+        switch self {
+        case .sos, .seasonLength, .delta, .mn, .rsp, .rau, .rmse: return true
+        case .fveg, .fnpv, .fsoil, .unmixRMSE: return false
+        }
+    }
+
+    /// True for spectral unmixing fraction params (per-frame animated maps).
+    var isFraction: Bool { !isPhenology }
+
+    /// Phenology cases only (for DL fit parameter display).
+    static var phenologyCases: [PhenologyParameter] {
+        allCases.filter { $0.isPhenology }
+    }
+
+    /// Fraction cases only (for spectral unmixing display).
+    static var fractionCases: [PhenologyParameter] {
+        allCases.filter { $0.isFraction }
+    }
 
     func extract(from p: DLParams) -> Double {
         switch self {
@@ -344,6 +370,7 @@ enum PhenologyParameter: String, CaseIterable {
         case .rsp: return p.rsp
         case .rau: return p.rau
         case .rmse: return p.rmse
+        case .fveg, .fnpv, .fsoil, .unmixRMSE: return 0 // not applicable
         }
     }
 }

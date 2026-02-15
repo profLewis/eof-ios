@@ -58,6 +58,9 @@ struct ContentView: View {
     @State private var isInspectingPixel = false
     @State private var pixelInspectTimer: Timer?
     @State private var pixelFitTask: Task<Void, Never>?
+    // Spectral unmixing
+    @State private var frameUnmixResults: [UUID: FrameUnmixResult] = [:]
+    @State private var isRunningUnmix = false
 
     struct SelectionItem: Identifiable {
         let id = UUID()
@@ -122,11 +125,20 @@ struct ContentView: View {
                     if processor.frames.count >= 4 {
                         runDLFit()
                     }
+                    // Auto-run spectral unmixing if enabled
+                    if settings.enableSpectralUnmixing {
+                        runUnmixing()
+                    }
                 }
             }
             .onChange(of: settings.showBasemap) {
                 if settings.showBasemap && basemapImage == nil && !processor.frames.isEmpty {
                     loadBasemap()
+                }
+            }
+            .onChange(of: settings.enableSpectralUnmixing) {
+                if settings.enableSpectralUnmixing && frameUnmixResults.isEmpty && !processor.frames.isEmpty {
+                    runUnmixing()
                 }
             }
             .onChange(of: settings.displayMode) {
@@ -169,6 +181,9 @@ struct ContentView: View {
                 isClusterFiltered = false
                 phenologyDisplayParam = nil
                 showBadData = false
+                // Clear unmixing
+                frameUnmixResults = [:]
+                isRunningUnmix = false
                 // Clear pixel inspection
                 isInspectingPixel = false
                 // Clear sub-AOI selection
@@ -379,7 +394,12 @@ struct ContentView: View {
                     .buttonStyle(.bordered)
                     .tint(isRunningPixelFit ? .red : (pixelPhenology == nil ? .orange : (pixelFitIsStale ? .green : .red)))
                     .disabled(dlBest == nil && !isRunningPixelFit)
-                    if pixelPhenology != nil {
+                    if isRunningPixelFit {
+                        ProgressView(value: pixelFitProgress)
+                            .frame(width: 60)
+                            .tint(.orange)
+                    }
+                    if pixelPhenology != nil || !frameUnmixResults.isEmpty {
                         liveMenu
                     }
                     Spacer()
@@ -443,7 +463,10 @@ struct ContentView: View {
                     }
 
                     let currentPhenoMap: [[Float]]? = phenologyDisplayParam.flatMap { param in
-                        pixelPhenology?.parameterMap(param)
+                        if param.isFraction {
+                            return fractionMap(for: frame, param: param)
+                        }
+                        return pixelPhenology?.parameterMap(param)
                     }
                     let currentRejectionMap: [[Float]]? = showBadData ? pixelPhenology?.rejectionReasonMap() : nil
 
@@ -722,6 +745,25 @@ struct ContentView: View {
                     }
                     .font(.caption)
                     .foregroundStyle(.secondary)
+
+                    // Area-level fraction summary
+                    if let _ = frameUnmixResults[frame.id] {
+                        HStack(spacing: 8) {
+                            if let fv = medianFraction(for: frame, param: .fveg) {
+                                Text("fVeg \(String(format: "%.2f", fv))")
+                                    .foregroundStyle(.green)
+                            }
+                            if let fn = medianFraction(for: frame, param: .fnpv) {
+                                Text("fNPV \(String(format: "%.2f", fn))")
+                                    .foregroundStyle(.brown)
+                            }
+                            if let fs = medianFraction(for: frame, param: .fsoil) {
+                                Text("fSoil \(String(format: "%.2f", fs))")
+                                    .foregroundStyle(.orange)
+                            }
+                        }
+                        .font(.system(size: 9).monospacedDigit())
+                    }
                 }
             }
 
@@ -824,6 +866,20 @@ struct ContentView: View {
         }
     }
 
+    /// Per-frame max VI (from valid pixels within AOI).
+    private func maxVI(for frame: NDVIFrame) -> Double {
+        var mx: Float = -.greatestFiniteMagnitude
+        for row in frame.ndvi { for v in row where !v.isNaN { mx = max(mx, v) } }
+        return mx > -.greatestFiniteMagnitude ? Double(mx) : Double(frame.medianNDVI)
+    }
+
+    /// Per-frame min VI (from valid pixels within AOI).
+    private func minVI(for frame: NDVIFrame) -> Double {
+        var mn: Float = .greatestFiniteMagnitude
+        for row in frame.ndvi { for v in row where !v.isNaN { mn = min(mn, v) } }
+        return mn < .greatestFiniteMagnitude ? Double(mn) : Double(frame.medianNDVI)
+    }
+
     private func medianReflectance(band: [[UInt16]]?, frame: NDVIFrame) -> Double {
         guard let band = band else { return 0 }
         let ofs = frame.dnOffset
@@ -873,7 +929,29 @@ struct ContentView: View {
                                            dash: isInspectingPixel ? [4, 2] : []))
                 }
 
-                // Per-pixel NDVI time series (when inspecting)
+                // Area max/min envelope (when inspecting pixel, for context)
+                if isInspectingPixel {
+                    ForEach(validSorted) { frame in
+                        LineMark(
+                            x: .value("Date", frame.date),
+                            y: .value(viLabel, maxVI(for: frame)),
+                            series: .value("Series", "Max")
+                        )
+                        .foregroundStyle(.green.opacity(0.1))
+                        .lineStyle(StrokeStyle(lineWidth: 0.5))
+                    }
+                    ForEach(validSorted) { frame in
+                        LineMark(
+                            x: .value("Date", frame.date),
+                            y: .value(viLabel, minVI(for: frame)),
+                            series: .value("Series", "Min")
+                        )
+                        .foregroundStyle(.green.opacity(0.1))
+                        .lineStyle(StrokeStyle(lineWidth: 0.5))
+                    }
+                }
+
+                // Per-pixel time series (when inspecting)
                 if isInspectingPixel {
                     let pixData = pixelNDVIData(sorted: sorted)
                     ForEach(pixData) { pt in
@@ -1003,6 +1081,43 @@ struct ContentView: View {
                     .foregroundStyle(pt.color)
                     .lineStyle(StrokeStyle(lineWidth: 2.5))
                 }
+
+                // Fraction time series (when unmixing enabled)
+                if settings.showFractionTimeSeries && !frameUnmixResults.isEmpty {
+                    ForEach(validSorted) { frame in
+                        if let fv = medianFraction(for: frame, param: .fveg) {
+                            LineMark(
+                                x: .value("Date", frame.date),
+                                y: .value(viLabel, fv),
+                                series: .value("Series", "fVeg")
+                            )
+                            .foregroundStyle(.green.opacity(0.6))
+                            .lineStyle(StrokeStyle(lineWidth: 1.5, dash: [6, 3]))
+                        }
+                    }
+                    ForEach(validSorted) { frame in
+                        if let fn = medianFraction(for: frame, param: .fnpv) {
+                            LineMark(
+                                x: .value("Date", frame.date),
+                                y: .value(viLabel, fn),
+                                series: .value("Series", "fNPV")
+                            )
+                            .foregroundStyle(.brown.opacity(0.6))
+                            .lineStyle(StrokeStyle(lineWidth: 1.5, dash: [6, 3]))
+                        }
+                    }
+                    ForEach(validSorted) { frame in
+                        if let fs = medianFraction(for: frame, param: .fsoil) {
+                            LineMark(
+                                x: .value("Date", frame.date),
+                                y: .value(viLabel, fs),
+                                series: .value("Series", "fSoil")
+                            )
+                            .foregroundStyle(.orange.opacity(0.5))
+                            .lineStyle(StrokeStyle(lineWidth: 1.5, dash: [6, 3]))
+                        }
+                    }
+                }
             }
             .chartYAxis {
                 AxisMarks(values: [-0.2, 0, 0.25, 0.5, 0.75, 1.0])
@@ -1062,6 +1177,95 @@ struct ContentView: View {
                 }
                 .font(.system(size: 9).monospacedDigit())
                 .foregroundStyle(.cyan)
+            }
+
+            // Pixel unmixing fractions annotation
+            if isInspectingPixel, currentFrameIndex < processor.frames.count {
+                let cf = processor.frames[currentFrameIndex]
+                if let ur = frameUnmixResults[cf.id],
+                   inspectedPixelRow < ur.height, inspectedPixelCol < ur.width {
+                    let fv = ur.fveg[inspectedPixelRow][inspectedPixelCol]
+                    if !fv.isNaN {
+                        let fn = ur.fnpv[inspectedPixelRow][inspectedPixelCol]
+                        let fs = ur.fsoil[inspectedPixelRow][inspectedPixelCol]
+                        let rm = ur.rmse[inspectedPixelRow][inspectedPixelCol]
+                        HStack(spacing: 8) {
+                            Text("fVeg \(String(format: "%.2f", fv))")
+                                .foregroundStyle(.green)
+                            Text("fNPV \(String(format: "%.2f", fn))")
+                                .foregroundStyle(.brown)
+                            Text("fSoil \(String(format: "%.2f", fs))")
+                                .foregroundStyle(.orange)
+                            Text("RMSE \(String(format: "%.4f", rm))")
+                                .foregroundStyle(.secondary)
+                        }
+                        .font(.system(size: 9).monospacedDigit())
+                    }
+                }
+            }
+        }
+    }
+
+    // MARK: - Spectral Unmixing
+
+    /// Extract fraction map for a given frame and parameter.
+    private func fractionMap(for frame: NDVIFrame, param: PhenologyParameter) -> [[Float]]? {
+        guard let result = frameUnmixResults[frame.id] else { return nil }
+        switch param {
+        case .fveg: return result.fveg
+        case .fnpv: return result.fnpv
+        case .fsoil: return result.fsoil
+        case .unmixRMSE: return result.rmse
+        default: return nil
+        }
+    }
+
+    /// Compute median fraction value for a frame (area-level).
+    private func medianFraction(for frame: NDVIFrame, param: PhenologyParameter) -> Double? {
+        guard let map = fractionMap(for: frame, param: param) else { return nil }
+        var vals = [Float]()
+        for row in map { for v in row where !v.isNaN { vals.append(v) } }
+        guard !vals.isEmpty else { return nil }
+        vals.sort()
+        let mid = vals.count / 2
+        return Double(vals.count % 2 == 0 ? (vals[mid-1] + vals[mid]) / 2 : vals[mid])
+    }
+
+    /// Run spectral unmixing on all frames.
+    private func runUnmixing() {
+        guard settings.enableSpectralUnmixing else { return }
+        isRunningUnmix = true
+        let frames = processor.frames
+        Task.detached {
+            var results = [UUID: FrameUnmixResult]()
+            for frame in frames {
+                // Build band arrays from available bands (B02, B03, B04, B08)
+                var bands = [[[UInt16]]]()
+                var bandInfo = [(band: String, nm: Double)]()
+                // Always have red (B04) and NIR (B08)
+                bands.append(frame.redBand)
+                bandInfo.append(("B04", 665))
+                bands.append(frame.nirBand)
+                bandInfo.append(("B08", 842))
+                if let green = frame.greenBand {
+                    bands.append(green)
+                    bandInfo.append(("B03", 560))
+                }
+                if let blue = frame.blueBand {
+                    bands.append(blue)
+                    bandInfo.append(("B02", 490))
+                }
+                guard bands.count >= 3 else { continue }
+                let result = SpectralUnmixing.unmixFrame(
+                    bands: bands, bandInfo: bandInfo,
+                    dnOffset: frame.dnOffset,
+                    width: frame.width, height: frame.height
+                )
+                results[frame.id] = result
+            }
+            await MainActor.run {
+                frameUnmixResults = results
+                isRunningUnmix = false
             }
         }
     }
@@ -1191,6 +1395,36 @@ struct ContentView: View {
             }
         }
 
+        // Predicted spectrum from unmixing (if available for current frame)
+        if let unmixResult = frameUnmixResults[current.id] {
+            // Get median fractions for the frame (or single pixel)
+            let fracs: UnmixResult?
+            if usePixel, inspectedPixelRow < unmixResult.height, inspectedPixelCol < unmixResult.width {
+                let fv = unmixResult.fveg[inspectedPixelRow][inspectedPixelCol]
+                let fn = unmixResult.fnpv[inspectedPixelRow][inspectedPixelCol]
+                let fs = unmixResult.fsoil[inspectedPixelRow][inspectedPixelCol]
+                let rm = unmixResult.rmse[inspectedPixelRow][inspectedPixelCol]
+                fracs = fv.isNaN ? nil : UnmixResult(fveg: fv, fnpv: fn, fsoil: fs, rmse: rm)
+            } else if let mfv = medianFraction(for: current, param: .fveg),
+                      let mfn = medianFraction(for: current, param: .fnpv),
+                      let mfs = medianFraction(for: current, param: .fsoil) {
+                fracs = UnmixResult(fveg: Float(mfv), fnpv: Float(mfn), fsoil: Float(mfs), rmse: 0)
+            } else {
+                fracs = nil
+            }
+            if let f = fracs {
+                let endmembers = EndmemberLibrary.defaults
+                let availableBands: [(band: String, nm: Double)] = currentVals.map { ($0.band, $0.nm) }
+                let predicted = SpectralUnmixing.predict(
+                    fractions: f, endmembers: endmembers, bands: availableBands)
+                for p in predicted {
+                    let band = availableBands.first(where: { $0.nm == p.nm })?.band ?? ""
+                    pts.append(SpectralPt(id: "pred_\(band)", nm: p.nm, refl: p.refl,
+                                          series: "Predicted", band: band))
+                }
+            }
+        }
+
         return Chart(pts) { pt in
             LineMark(
                 x: .value("Wavelength (nm)", pt.nm),
@@ -1218,7 +1452,8 @@ struct ContentView: View {
         .chartForegroundStyleScale([
             "Current": Color.red,
             "Peak (\(peakFrame?.dateString ?? ""))": Color.green.opacity(0.7),
-            "Min (\(minFrame?.dateString ?? ""))": Color.blue.opacity(0.7)
+            "Min (\(minFrame?.dateString ?? ""))": Color.blue.opacity(0.7),
+            "Predicted": Color.purple.opacity(0.8)
         ])
         .chartXScale(domain: 400...900)
         .chartYScale(domain: 0...0.6)
@@ -1548,7 +1783,7 @@ struct ContentView: View {
                 }
             }
             Divider()
-            ForEach(PhenologyParameter.allCases, id: \.self) { param in
+            ForEach(PhenologyParameter.phenologyCases, id: \.self) { param in
                 Button {
                     phenologyDisplayParam = param
                     showBadData = false
@@ -1558,6 +1793,22 @@ struct ContentView: View {
                         Label(param.rawValue, systemImage: "checkmark")
                     } else {
                         Text(param.rawValue)
+                    }
+                }
+            }
+            if !frameUnmixResults.isEmpty {
+                Divider()
+                ForEach(PhenologyParameter.fractionCases, id: \.self) { param in
+                    Button {
+                        phenologyDisplayParam = param
+                        showBadData = false
+                        startPlayback()
+                    } label: {
+                        if phenologyDisplayParam == param && !showBadData {
+                            Label(param.rawValue, systemImage: "checkmark")
+                        } else {
+                            Text(param.rawValue)
+                        }
                     }
                 }
             }
@@ -1615,15 +1866,6 @@ struct ContentView: View {
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
-            }
-
-            // Per-pixel progress
-            if isRunningPixelFit {
-                ProgressView(value: pixelFitProgress) {
-                    Text("Fitting pixels...")
-                        .font(.caption2)
-                        .foregroundStyle(.orange)
-                }
             }
 
             // Per-pixel results summary
@@ -1803,8 +2045,15 @@ struct ContentView: View {
 
     private func runDLFit() {
         let refYr = referenceYear
-        let data = processor.frames.filter { $0.validPixelCount > 0 }.map { f in
-            DoubleLogistic.DataPoint(doy: Double(f.continuousDOY(referenceYear: refYr)), ndvi: Double(f.medianNDVI))
+        let useFveg = settings.dlFitTarget == .fveg && !frameUnmixResults.isEmpty
+        let data = processor.frames.filter { $0.validPixelCount > 0 }.compactMap { f -> DoubleLogistic.DataPoint? in
+            let val: Double
+            if useFveg, let fv = medianFraction(for: f, param: .fveg) {
+                val = fv
+            } else {
+                val = Double(f.medianNDVI)
+            }
+            return DoubleLogistic.DataPoint(doy: Double(f.continuousDOY(referenceYear: refYr)), ndvi: val)
         }
         guard data.count >= 4 else { return }
         let p = settings.pixelPerturbation
@@ -2438,7 +2687,8 @@ struct ContentView: View {
     @MainActor
     private func copyCurrentFrame(frame: NDVIFrame) {
         let currentPhenoMap: [[Float]]? = phenologyDisplayParam.flatMap { p in
-            pixelPhenology?.parameterMap(p)
+            if p.isFraction { return fractionMap(for: frame, param: p) }
+            return pixelPhenology?.parameterMap(p)
         }
         let rejMap: [[Float]]? = showBadData ? pixelPhenology?.rejectionReasonMap() : nil
         let view = NDVIMapView(
