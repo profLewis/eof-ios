@@ -25,17 +25,17 @@ struct DLParams: Codable, Equatable {
         return mx - (mx - mn) * (spring + autumn - 1.0)
     }
 
-    /// Single decreasing logistic for fSoil: high before SOS, decreases to ~0 during green-up.
-    /// fSoil(t) = maxVal / (1 + exp(rsp * (t - sos)))
-    func evaluateSoilFraction(t: Double, maxVal: Double) -> Double {
+    /// Single decreasing logistic for fSoil: starts at 1, decreases to 0 during green-up.
+    /// fSoil(t) = 1 - sigmoid(rsp, sos)
+    func evaluateSoilFraction(t: Double) -> Double {
         let spring = 1.0 / (1.0 + exp(-rsp * (t - sos)))
-        return maxVal * (1.0 - spring)
+        return 1.0 - spring
     }
 
-    /// Single increasing logistic for fNPV: near 0 until EOS, then rises during senescence.
-    /// fNPV(t) = maxVal / (1 + exp(-rau * (t - eos)))
-    func evaluateNPVFraction(t: Double, maxVal: Double) -> Double {
-        return maxVal / (1.0 + exp(-rau * (t - eos)))
+    /// Single increasing logistic for fNPV: starts at 0, rises to 1 during senescence.
+    /// fNPV(t) = sigmoid(rau, eos)
+    func evaluateNPVFraction(t: Double) -> Double {
+        return 1.0 / (1.0 + exp(-rau * (t - eos)))
     }
 
     /// Evaluate at an array of DOYs.

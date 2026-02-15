@@ -766,6 +766,16 @@ struct ContentView: View {
                             .padding(6)
                             .opacity(0.7)
                         }
+                        .overlay(alignment: .topLeading) {
+                            // Label showing what the image is currently displaying
+                            Text(imageDisplayLabel)
+                                .font(.system(size: 9).bold())
+                                .foregroundStyle(.white)
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 3)
+                                .background(.black.opacity(0.5), in: Capsule())
+                                .padding(6)
+                        }
                         .overlay(alignment: .bottomTrailing) {
                             if zoomScale > 1.05 || gestureZoom != 1.0 {
                                 let z = min(8.0, max(1.0, zoomScale * gestureZoom))
@@ -820,7 +830,7 @@ struct ContentView: View {
                             }
                             if let fn = medianFraction(for: frame, param: .fnpv) {
                                 Text("fNPV \(String(format: "%.2f", fn))")
-                                    .foregroundStyle(.brown)
+                                    .foregroundStyle(.yellow)
                             }
                             if let fs = medianFraction(for: frame, param: .fsoil) {
                                 Text("fSoil \(String(format: "%.2f", fs))")
@@ -1207,7 +1217,7 @@ struct ContentView: View {
                                 y: .value(viLabel, fn),
                                 series: .value("Series", "fNPV")
                             )
-                            .foregroundStyle(.brown.opacity(0.6))
+                            .foregroundStyle(.yellow.opacity(0.6))
                             .lineStyle(StrokeStyle(lineWidth: 1.5, dash: [6, 3]))
                         }
                     }
@@ -1298,7 +1308,7 @@ struct ContentView: View {
                             Text("fVeg \(String(format: "%.2f", fv))")
                                 .foregroundStyle(.green)
                             Text("fNPV \(String(format: "%.2f", fn))")
-                                .foregroundStyle(.brown)
+                                .foregroundStyle(.yellow)
                             Text("fSoil \(String(format: "%.2f", fs))")
                                 .foregroundStyle(.orange)
                             Text("RMSE \(String(format: "%.4f", rm))")
@@ -1644,7 +1654,7 @@ struct ContentView: View {
                 "Median": Color.gray,
                 "Predicted": Color.purple.opacity(0.8),
                 "Green Vegetation": Color.green.opacity(0.4),
-                "NPV (Dry Vegetation)": Color.brown.opacity(0.4),
+                "NPV (Dry Vegetation)": Color.yellow.opacity(0.4),
                 "Bare Soil": Color.orange.opacity(0.4)
             ]
         }
@@ -1806,35 +1816,24 @@ struct ContentView: View {
         }
 
         // Fraction model curves (fSoil single decreasing logistic, fNPV single increasing logistic)
+        // Soil: 1→0 at SOS (rate=rsp), NPV: 0→1 at EOS (rate=rau)
         if let dl = dlBest, !frameUnmixResults.isEmpty, !isInspectingPixel {
-            // Estimate max fraction values from observed medians
-            let soilMax = estimateMaxFraction(param: .fsoil, sorted: sorted)
-            let npvMax = estimateMaxFraction(param: .fnpv, sorted: sorted)
-
-            if soilMax > 0.01 {
-                for cdoy in cdoys {
-                    if let d = dateForCDOY(cdoy) {
-                        pts.append(DLCurvePoint(
-                            id: "fsoil_\(cdoy)", date: d,
-                            ndvi: dl.evaluateSoilFraction(t: Double(cdoy), maxVal: soilMax),
-                            series: "fSoil-fit",
-                            color: .orange.opacity(0.7),
-                            style: StrokeStyle(lineWidth: 2)
-                        ))
-                    }
-                }
-            }
-            if npvMax > 0.01 {
-                for cdoy in cdoys {
-                    if let d = dateForCDOY(cdoy) {
-                        pts.append(DLCurvePoint(
-                            id: "fnpv_\(cdoy)", date: d,
-                            ndvi: dl.evaluateNPVFraction(t: Double(cdoy), maxVal: npvMax),
-                            series: "fNPV-fit",
-                            color: .brown.opacity(0.7),
-                            style: StrokeStyle(lineWidth: 2)
-                        ))
-                    }
+            for cdoy in cdoys {
+                if let d = dateForCDOY(cdoy) {
+                    pts.append(DLCurvePoint(
+                        id: "fsoil_\(cdoy)", date: d,
+                        ndvi: dl.evaluateSoilFraction(t: Double(cdoy)),
+                        series: "fSoil-fit",
+                        color: .orange.opacity(0.7),
+                        style: StrokeStyle(lineWidth: 2)
+                    ))
+                    pts.append(DLCurvePoint(
+                        id: "fnpv_\(cdoy)", date: d,
+                        ndvi: dl.evaluateNPVFraction(t: Double(cdoy)),
+                        series: "fNPV-fit",
+                        color: .yellow.opacity(0.7),
+                        style: StrokeStyle(lineWidth: 2)
+                    ))
                 }
             }
         }
@@ -1842,13 +1841,18 @@ struct ContentView: View {
         return pts
     }
 
-    /// Estimate maximum fraction value from observed medians (for single logistic amplitude).
-    private func estimateMaxFraction(param: PhenologyParameter, sorted: [NDVIFrame]) -> Double {
-        let vals = sorted.compactMap { medianFraction(for: $0, param: param) }
-        guard !vals.isEmpty else { return 0 }
-        let s = vals.sorted()
-        // Use 90th percentile as max
-        return s[min(s.count - 1, s.count * 9 / 10)]
+    /// Label showing what the image is currently displaying.
+    private var imageDisplayLabel: String {
+        if showBadData {
+            return "Rejection Map"
+        }
+        if let param = phenologyDisplayParam {
+            return param.rawValue
+        }
+        if settings.displayMode == .ndvi {
+            return settings.vegetationIndex.rawValue
+        }
+        return settings.displayMode.rawValue
     }
 
     // MARK: - Phenology Indicator Lines (precomputed for chart)
