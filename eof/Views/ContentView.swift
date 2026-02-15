@@ -302,7 +302,9 @@ struct ContentView: View {
                     minCol: sel.minCol, maxCol: sel.maxCol,
                     frames: processor.frames,
                     pixelPhenology: pixelPhenology,
-                    medianFit: dlBest
+                    medianFit: dlBest,
+                    unmixResults: frameUnmixResults,
+                    useFVC: settings.vegetationIndex == .fvc
                 )
                 .presentationDetents([.large])
             }

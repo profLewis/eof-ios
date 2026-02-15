@@ -428,14 +428,10 @@ class AppSettings {
     }
 
     var startDateString: String {
-        let fmt = DateFormatter()
-        fmt.dateFormat = "yyyy-MM-dd"
-        return fmt.string(from: startDate)
+        startDate.formatted(.dateTime.day().month(.abbreviated).year())
     }
 
     var endDateString: String {
-        let fmt = DateFormatter()
-        fmt.dateFormat = "yyyy-MM-dd"
-        return fmt.string(from: endDate)
+        endDate.formatted(.dateTime.day().month(.abbreviated).year())
     }
 }

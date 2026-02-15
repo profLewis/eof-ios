@@ -9,6 +9,8 @@ struct SelectionAnalysisView: View {
     let frames: [NDVIFrame]
     let pixelPhenology: PixelPhenologyResult?
     let medianFit: DLParams?
+    var unmixResults: [UUID: FrameUnmixResult] = [:]
+    var useFVC: Bool = false
 
     @Environment(\.dismiss) private var dismiss
 
@@ -79,13 +81,23 @@ struct SelectionAnalysisView: View {
         let cal = Calendar.current
         let rMin = minRow, rMax = maxRow, cMin = minCol, cMax = maxCol
 
-        // Mean NDVI per frame
+        // Mean NDVI or fVeg per frame
         let points: [(date: Date, mean: Double)] = sorted.compactMap { frame in
             var sum: Double = 0, count = 0
-            for row in rMin...min(rMax, frame.height - 1) {
-                for col in cMin...min(cMax, frame.width - 1) {
-                    let v = frame.ndvi[row][col]
-                    if !v.isNaN { sum += Double(v); count += 1 }
+            if useFVC, let ur = unmixResults[frame.id] {
+                // Use fVeg from unmixing
+                for row in rMin...min(rMax, ur.height - 1) {
+                    for col in cMin...min(cMax, ur.width - 1) {
+                        let v = ur.fveg[row][col]
+                        if !v.isNaN { sum += Double(v); count += 1 }
+                    }
+                }
+            } else {
+                for row in rMin...min(rMax, frame.height - 1) {
+                    for col in cMin...min(cMax, frame.width - 1) {
+                        let v = frame.ndvi[row][col]
+                        if !v.isNaN { sum += Double(v); count += 1 }
+                    }
                 }
             }
             guard count > 0 else { return nil }
@@ -240,7 +252,7 @@ struct SelectionAnalysisView: View {
     private var ndviTimeSeriesChart: some View {
         VStack(alignment: .leading, spacing: 2) {
             HStack {
-                Text("Mean NDVI (selection)")
+                Text(useFVC ? "Mean FVC (selection)" : "Mean NDVI (selection)")
                     .font(.caption.bold())
                     .foregroundStyle(.green)
                 if !fitCurve.isEmpty {
@@ -290,7 +302,7 @@ struct SelectionAnalysisView: View {
                     .lineStyle(StrokeStyle(lineWidth: 1, dash: [4, 2]))
                 }
             }
-            .chartYScale(domain: -0.2...1.0)
+            .chartYScale(domain: useFVC ? 0.0...1.0 : -0.2...1.0)
             .frame(height: 180)
         }
     }
