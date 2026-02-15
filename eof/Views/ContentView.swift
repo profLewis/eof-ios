@@ -146,6 +146,11 @@ struct ContentView: View {
                     runUnmixing()
                 }
             }
+            .onChange(of: settings.dlFitTarget) {
+                if dlBest != nil {
+                    runDLFit()
+                }
+            }
             .onChange(of: settings.displayMode) {
                 // Lazy-load missing bands in background — view re-renders instantly
                 if !processor.frames.isEmpty {
@@ -396,12 +401,26 @@ struct ContentView: View {
                 }
             case .done:
                 HStack {
-                    Button("Fit") {
+                    Button(settings.dlFitTarget == .fveg && !frameUnmixResults.isEmpty ? "Fit fVeg" : "Fit") {
                         runDLFit()
                     }
                     .font(.caption)
                     .buttonStyle(.bordered)
                     .tint(.yellow)
+                    Button(isRunningUnmix ? "Stop" : "Unmix") {
+                        if isRunningUnmix {
+                            isRunningUnmix = false
+                        } else {
+                            runUnmixing()
+                        }
+                    }
+                    .font(.caption)
+                    .buttonStyle(.bordered)
+                    .tint(isRunningUnmix ? .red : (frameUnmixResults.isEmpty ? .purple : .purple.opacity(0.5)))
+                    if isRunningUnmix {
+                        ProgressView()
+                            .scaleEffect(0.7)
+                    }
                     Button(isRunningPixelFit ? "Stop" : "Per-Pixel") {
                         if isRunningPixelFit {
                             pixelFitTask?.cancel()
@@ -1109,7 +1128,7 @@ struct ContentView: View {
                 }
 
                 // Fraction time series (when unmixing enabled)
-                if settings.showFractionTimeSeries && !frameUnmixResults.isEmpty {
+                if !frameUnmixResults.isEmpty {
                     ForEach(validSorted) { frame in
                         if let fv = medianFraction(for: frame, param: .fveg) {
                             LineMark(
@@ -1259,7 +1278,6 @@ struct ContentView: View {
 
     /// Run spectral unmixing on all frames.
     private func runUnmixing() {
-        guard settings.enableSpectralUnmixing else { return }
         isRunningUnmix = true
         let frames = processor.frames
         Task.detached {

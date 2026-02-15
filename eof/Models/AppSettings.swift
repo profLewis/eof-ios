@@ -70,7 +70,7 @@ class AppSettings {
     var pixelSlopePerturbation: Double = 0.10 { didSet { save() } }
     var clusterFilterThreshold: Double = 4.0 { didSet { save() } }
     var minSeasonLength: Int = 30 { didSet { save() } }
-    var maxSeasonLength: Int = 150 { didSet { save() } }
+    var maxSeasonLength: Int = 250 { didSet { save() } }
     /// Max % difference between green-up (rsp) and senescence (rau) rates. 0 = no constraint.
     var slopeSymmetry: Int = 20 { didSet { save() } }
     /// Second pass: refit with weights from first-pass DL curve.
