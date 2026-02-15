@@ -2,6 +2,9 @@ import SwiftUI
 import Charts
 import MapKit
 
+/// Darker brown for soil fraction lines (distinct from orange UI elements and yellow NPV).
+private let soilBrown = Color(red: 0.55, green: 0.3, blue: 0.1)
+
 struct ContentView: View {
     @State private var processor = NDVIProcessor()
     @State private var settings = AppSettings.shared
@@ -842,7 +845,7 @@ struct ContentView: View {
                             }
                             if let fs = medianFraction(for: frame, param: .fsoil) {
                                 Text("fSoil \(String(format: "%.2f", fs))")
-                                    .foregroundStyle(.orange)
+                                    .foregroundStyle(soilBrown)
                             }
                         }
                         .font(.system(size: 9).monospacedDigit())
@@ -1236,7 +1239,7 @@ struct ContentView: View {
                                 y: .value(viLabel, fs),
                                 series: .value("Series", "fSoil")
                             )
-                            .foregroundStyle(.orange.opacity(0.5))
+                            .foregroundStyle(soilBrown.opacity(0.5))
                             .lineStyle(StrokeStyle(lineWidth: 1.5, dash: [6, 3]))
                         }
                     }
@@ -1318,7 +1321,7 @@ struct ContentView: View {
                             Text("fNPV \(String(format: "%.2f", fn))")
                                 .foregroundStyle(.yellow)
                             Text("fSoil \(String(format: "%.2f", fs))")
-                                .foregroundStyle(.orange)
+                                .foregroundStyle(soilBrown)
                             Text("RMSE \(String(format: "%.4f", rm))")
                                 .foregroundStyle(.secondary)
                         }
@@ -1507,8 +1510,9 @@ struct ContentView: View {
                             showSpectralChart = false
                         } label: {
                             Image(systemName: "xmark.circle.fill")
-                                .font(.caption)
+                                .font(.title3)
                                 .foregroundStyle(.secondary)
+                                .frame(width: 32, height: 32)
                         }
                     }
 
@@ -1680,7 +1684,7 @@ struct ContentView: View {
                 "Predicted": Color.purple.opacity(0.8),
                 "GV scaled": Color.green.opacity(0.5),
                 "NPV scaled": Color.yellow.opacity(0.5),
-                "Soil scaled": Color.orange.opacity(0.5)
+                "Soil scaled": soilBrown.opacity(0.5)
             ]
         }
 
@@ -1863,7 +1867,7 @@ struct ContentView: View {
                         id: "fsoil_\(cdoy)", date: d,
                         ndvi: dl.evaluateSoilFraction(t: Double(cdoy)),
                         series: "fSoil-fit",
-                        color: .orange.opacity(0.7),
+                        color: soilBrown.opacity(0.7),
                         style: StrokeStyle(lineWidth: 2)
                     ))
                     pts.append(DLCurvePoint(
@@ -2209,6 +2213,7 @@ struct ContentView: View {
                     .font(.system(size: 11))
                 Text(showBadData ? "Bad Data" : (phenologyDisplayParam?.rawValue ?? liveDisplayName))
                     .font(.system(size: 11, weight: .semibold))
+                    .lineLimit(1)
                 Image(systemName: "chevron.up.chevron.down")
                     .font(.system(size: 8))
             }
@@ -3450,7 +3455,7 @@ struct FractionColorBar: View {
                 switch label {
                 case "FVC":  return (UInt8(30 + (1-t) * 90), UInt8(80 + t * 175), UInt8(30 + (1-t) * 40))
                 case "NPV":  return (UInt8(40 + t * 215), UInt8(40 + t * 215), UInt8(20))
-                case "Soil": return (UInt8(40 + t * 215), UInt8(40 + t * 140), UInt8(20))
+                case "Soil": return (UInt8(25 + t * 115), UInt8(20 + t * 57), UInt8(5 + t * 20))
                 default:     return (UInt8(40 + t * 215), UInt8(40 + t * 215), UInt8(40 + t * 215))
                 }
             }
