@@ -14,6 +14,7 @@ struct ContentView: View {
     // settings.playbackSpeed now in settings
     @State private var showingLog = false
     @State private var showingSettings = false
+    @State private var showingAOI = false
     @State private var dragStartIndex = 0
     @State private var log = ActivityLog.shared
     @State private var lastStartDate: String = ""
@@ -28,6 +29,8 @@ struct ContentView: View {
     @State private var dlEnsemble: [DLParams] = []
     @State private var dlSliders = DLParams(mn: 0.1, mx: 0.7, sos: 120, rsp: 0.05, eos: 280, rau: 0.05)
     @State private var showDLSliders = false
+    // Per-fraction DL fits (auto-fitted after unmixing)
+    @State private var fractionDLFits: [PhenologyParameter: DLParams] = [:]
     // Per-pixel phenology
     @State private var pixelPhenology: PixelPhenologyResult?
     @State private var pixelPhenologyBase: PixelPhenologyResult?  // original before RMSE reclassification
@@ -64,6 +67,7 @@ struct ContentView: View {
     @State private var inspectedPixelCol: Int = 0
     @State private var isInspectingPixel = false
     @State private var pixelInspectTimer: Timer?
+    @State private var fetchTask: Task<Void, Never>?
     @State private var pixelFitTask: Task<Void, Never>?
     // Spectral unmixing
     @State private var frameUnmixResults: [UUID: FrameUnmixResult] = [:]
@@ -112,15 +116,49 @@ struct ContentView: View {
                 .padding(.horizontal)
                 .padding(.top, 0)
             }
-            .navigationTitle("EOF")
             .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .principal) {
+                    HStack(spacing: 4) {
+                        if processor.status == .searching || processor.status == .processing || isRunningUnmix || isRunningPixelFit {
+                            Image(systemName: "leaf.fill")
+                                .font(.system(size: 10))
+                                .foregroundStyle(isRunningUnmix ? .purple : isRunningPixelFit ? .orange : statusTitleColor)
+                                .rotationEffect(.degrees(leafRotation))
+                                .onAppear {
+                                    withAnimation(.linear(duration: 1.5).repeatForever(autoreverses: false)) {
+                                        leafRotation = 360
+                                    }
+                                }
+                                .onDisappear { leafRotation = 0 }
+                        }
+                        Text("EOF")
+                            .font(.headline.bold())
+                            .foregroundStyle(isRunningUnmix ? .purple : isRunningPixelFit ? .orange : statusTitleColor)
+                            .opacity(statusTitleOpacity)
+                            .animation(statusTitleAnimation, value: processor.status == .idle || processor.status == .done)
+                    }
+                    .onTapGesture {
+                        if processor.status == .error || processor.errorMessage != nil {
+                            showingLog = true
+                        }
+                    }
+                }
+            }
             .onAppear {
-                if processor.status == .idle {
-                    startFetch()
+                if processor.status == .idle && processor.frames.isEmpty {
+                    // Show AOI tool on startup for user to confirm area
+                    showingAOI = true
                 }
             }
             .task { await prefetchSASToken() }
             .onChange(of: processor.status) {
+                // Pulse animation for status indicator
+                if processor.status == .searching || processor.status == .processing || processor.status == .error {
+                    statusPulse = true
+                } else {
+                    statusPulse = false
+                }
                 // Auto-play when loading finishes
                 if processor.status == .done && !processor.frames.isEmpty && !isPlaying {
                     // Show comparison results if in compare mode
@@ -135,12 +173,10 @@ struct ContentView: View {
                     if settings.showBasemap && basemapImage == nil {
                         loadBasemap()
                     }
-                    // Auto-run unmixing first if FVC target (DL fit will follow after unmix completes)
-                    if settings.vegetationIndex == .fvc || settings.enableSpectralUnmixing {
-                        runUnmixing()
-                    }
-                    // Auto-fit — skip if FVC target (will fit after unmixing completes)
-                    if processor.frames.count >= 4 && settings.vegetationIndex != .fvc {
+                    // Always run unmixing first (computes FVC from median)
+                    runUnmixing()
+                    // DL fit will auto-run after unmixing completes
+                    if processor.frames.count >= 4 && !settings.enableSpectralUnmixing && settings.vegetationIndex != .fvc {
                         runDLFit()
                     }
                 }
@@ -156,30 +192,20 @@ struct ContentView: View {
                 }
             }
             .onChange(of: settings.vegetationIndex) {
-                if settings.vegetationIndex == .fvc && frameUnmixResults.isEmpty && !processor.frames.isEmpty {
-                    // Need to unmix first before fitting to FVC
-                    runUnmixing()
-                }
-                if dlBest != nil {
-                    if settings.vegetationIndex == .fvc && frameUnmixResults.isEmpty {
-                        // Will refit when unmix completes
-                    } else {
-                        runDLFit()
-                    }
+                guard !processor.frames.isEmpty else { return }
+                // Recompute VI values from raw bands when switching NDVI↔DVI
+                processor.recomputeVI()
+                if settings.vegetationIndex == .fvc && frameUnmixResults.isEmpty {
+                    runUnmixing() // Will refit DL when unmix completes
+                } else if dlBest != nil {
+                    runDLFit()
                 }
             }
             .onChange(of: settings.displayMode) {
-                // Lazy-load missing bands in background — view re-renders instantly
                 if !processor.frames.isEmpty {
                     Task {
                         await processor.loadMissingBands(for: settings.displayMode)
                     }
-                }
-            }
-            .onChange(of: settings.vegetationIndex) {
-                // Recompute VI values from raw bands when switching NDVI↔DVI
-                if !processor.frames.isEmpty {
-                    processor.recomputeVI()
                 }
             }
             .onChange(of: phenologyDisplayParam) {
@@ -188,47 +214,8 @@ struct ContentView: View {
                     runDLFit()
                 }
             }
-            .onChange(of: settings.aoiSourceLabel) {
-                // Cancel any in-progress download
-                processor.cancelFetch()
-                // Clear all data and restart when AOI changes
-                stopPlayback()
-                currentFrameIndex = 0
-                processor.resetGeometry()
-                processor.frames = []
-                processor.progress = 0
-                processor.progressMessage = ""
-                processor.errorMessage = nil
-                basemapImage = nil
-                // Clear phenology state
-                dlBest = nil
-                dlEnsemble = []
-                dlSliders = DLParams(mn: 0.1, mx: 0.7, sos: 120, rsp: 0.05, eos: 280, rau: 0.05)
-                pixelPhenology = nil
-                pixelPhenologyBase = nil
-                unfilteredPhenology = nil
-                pixelFitProgress = 0
-                pixelFitTask?.cancel()
-                pixelFitTask = nil
-                isRunningPixelFit = false
-                isClusterFiltered = false
-                phenologyDisplayParam = nil
-                showBadData = false
-                // Clear unmixing
-                frameUnmixResults = [:]
-                isRunningUnmix = false
-                unmixProgress = 0
-                // Clear pixel inspection
-                isInspectingPixel = false
-                // Clear sub-AOI selection
-                isSelectMode = false
-                selectionItem = nil
-                // Reset zoom
-                zoomScale = 1.0
-                panOffset = .zero
-                // Auto-restart fetch
-                processor.status = .idle
-                startFetch()
+            .onChange(of: settings.aoiGeneration) {
+                resetForNewAOI()
             }
             .onChange(of: showingSettings) {
                 // When settings sheet is dismissed, check what changed
@@ -285,13 +272,25 @@ struct ContentView: View {
                     }
                 }
                 ToolbarItem(placement: .topBarTrailing) {
-                    Button {
-                        showingLog = true
-                    } label: {
-                        Label("Log", systemImage: "doc.text.magnifyingglass")
+                    HStack(spacing: 8) {
+                        Button {
+                            showingAOI = true
+                        } label: {
+                            Label("Edit", systemImage: "map")
+                        }
+                        .buttonStyle(.glass)
+                        Button {
+                            showingLog = true
+                        } label: {
+                            Label("Log", systemImage: "doc.text.magnifyingglass")
+                        }
+                        .buttonStyle(.glass)
                     }
-                    .buttonStyle(.glass)
                 }
+            }
+            .sheet(isPresented: $showingAOI, onDismiss: onAOIDismiss) {
+                AOIView(isPresented: $showingAOI)
+                    .presentationDetents([.large])
             }
             .sheet(isPresented: $showingLog) {
                 LogView(isPresented: $showingLog, processor: processor)
@@ -383,6 +382,59 @@ struct ContentView: View {
 
     // MARK: - Status
 
+    @State private var statusPulse = false
+    @State private var leafRotation: Double = 0
+
+    /// Estimated total data size across all loaded frames.
+    private var totalDataSizeString: String {
+        guard let f = processor.frames.first else { return "" }
+        let px = f.width * f.height
+        // Each frame: ndvi(4B) + red(2B) + nir(2B) + optional green(2B) + blue(2B) + scl(2B)
+        var bytesPerPixel = 8 // ndvi + red + nir
+        if f.greenBand != nil { bytesPerPixel += 2 }
+        if f.blueBand != nil { bytesPerPixel += 2 }
+        if f.sclBand != nil { bytesPerPixel += 2 }
+        let totalBytes = px * bytesPerPixel * processor.frames.count
+        let mb = Double(totalBytes) / 1_000_000
+        if mb < 1 { return "<1 MB" }
+        return "\(Int(mb)) MB"
+    }
+
+    private var statusTitleColor: Color {
+        switch processor.status {
+        case .idle, .done:
+            return .green
+        case .searching:
+            return .yellow
+        case .processing:
+            return .orange
+        case .error:
+            return .red
+        }
+    }
+
+    private var statusTitleOpacity: Double {
+        switch processor.status {
+        case .idle, .done:
+            return 1.0
+        case .searching, .processing:
+            return statusPulse ? 0.3 : 1.0
+        case .error:
+            return statusPulse ? 0.2 : 1.0
+        }
+    }
+
+    private var statusTitleAnimation: Animation? {
+        switch processor.status {
+        case .idle, .done:
+            return nil
+        case .searching, .processing:
+            return .easeInOut(duration: 1.5).repeatForever(autoreverses: true)
+        case .error:
+            return .easeInOut(duration: 0.5).repeatForever(autoreverses: true)
+        }
+    }
+
     private var statusSection: some View {
         Group {
             switch processor.status {
@@ -467,9 +519,7 @@ struct ContentView: View {
                             .frame(width: 60)
                             .tint(.orange)
                     }
-                    if pixelPhenology != nil || !frameUnmixResults.isEmpty {
-                        liveMenu
-                    }
+                    liveMenu
                     Spacer()
                     if !processor.cachedFrames.isEmpty {
                         Button {
@@ -528,6 +578,12 @@ struct ContentView: View {
                         Text("DOY \(frame.dayOfYear)")
                             .font(.caption.monospacedDigit())
                             .foregroundStyle(.secondary)
+                        Text("\(frame.width)\u{00D7}\(frame.height)")
+                            .font(.system(size: 8).monospacedDigit())
+                            .foregroundStyle(.tertiary)
+                        Text(totalDataSizeString)
+                            .font(.system(size: 8).monospacedDigit())
+                            .foregroundStyle(.tertiary)
                         Spacer()
                         Button {
                             withAnimation(.easeInOut(duration: 0.2)) { showMovie.toggle() }
@@ -548,8 +604,11 @@ struct ContentView: View {
 
                     if showMovie {
                     GeometryReader { geo in
-                        let fitScale = max(1, min(8, geo.size.width / CGFloat(frame.width)))
-                        let currentZoom = min(8.0, max(1.0, zoomScale * gestureZoom))
+                        let widthScale = geo.size.width / CGFloat(frame.width)
+                        let heightScale = geo.size.height / CGFloat(frame.height)
+                        let fitScale = min(widthScale, heightScale)  // aspect-fit, fill screen
+                        let maxZoom = max(8.0, fitScale * 4)  // allow 4x beyond initial fit
+                        let currentZoom = min(maxZoom, max(1.0, zoomScale * gestureZoom))
                         let imageH = CGFloat(frame.height) * fitScale
                         let imageW = CGFloat(frame.width) * fitScale
                         let xInset = max(0, (geo.size.width - imageW) / 2)
@@ -620,8 +679,11 @@ struct ContentView: View {
                                         .updating($gestureZoom) { value, state, _ in
                                             state = value.magnification
                                         }
+                                        .onChanged { _ in
+                                            if isPlaying { stopPlayback() }
+                                        }
                                         .onEnded { value in
-                                            let newZoom = min(8.0, max(1.0, zoomScale * value.magnification))
+                                            let newZoom = min(maxZoom, max(1.0, zoomScale * value.magnification))
                                             withAnimation(.easeOut(duration: 0.2)) {
                                                 zoomScale = newZoom
                                                 if newZoom <= 1.0 {
@@ -671,7 +733,8 @@ struct ContentView: View {
                                                 selectionStart = value.startLocation
                                                 selectionEnd = value.location
                                             } else if currentZoom > 1.05 {
-                                                // Pan when zoomed
+                                                // Pan when zoomed — pause to save resources
+                                                if isPlaying { stopPlayback() }
                                                 let newOffset = CGSize(
                                                     width: panOffset.width + value.translation.width - (dragLastTranslation?.width ?? 0),
                                                     height: panOffset.height + value.translation.height - (dragLastTranslation?.height ?? 0)
@@ -782,29 +845,47 @@ struct ContentView: View {
                                         }
                                     }
                                 } label: {
-                                    Image(systemName: isSelectMode ? "rectangle.dashed" : "selection.pin.in.out")
-                                        .font(.caption)
-                                        .padding(6)
-                                        .background(isSelectMode ? AnyShapeStyle(.yellow.opacity(0.3)) : AnyShapeStyle(.ultraThinMaterial), in: Circle())
+                                    HStack(spacing: 3) {
+                                        Image(systemName: isSelectMode ? "rectangle.dashed" : "selection.pin.in.out")
+                                            .font(.caption)
+                                        if isSelectMode {
+                                            Text("Area")
+                                                .font(.system(size: 9, weight: .semibold))
+                                        }
+                                    }
+                                    .padding(.horizontal, isSelectMode ? 8 : 6)
+                                    .padding(.vertical, 6)
+                                    .background(isSelectMode ? AnyShapeStyle(.yellow.opacity(0.4)) : AnyShapeStyle(.ultraThinMaterial), in: Capsule())
+                                    .overlay(isSelectMode ? Capsule().stroke(.yellow, lineWidth: 1.5) : nil)
                                 }
                             }
                             .padding(6)
                             .opacity(0.7)
                         }
                         .overlay(alignment: .topLeading) {
-                            // Label showing what the image is currently displaying (below control buttons)
-                            Text(imageDisplayLabel)
-                                .font(.system(size: 9).bold())
-                                .foregroundStyle(.white)
-                                .padding(.horizontal, 6)
-                                .padding(.vertical, 3)
-                                .background(.black.opacity(0.5), in: Capsule())
-                                .padding(.leading, 6)
-                                .padding(.top, 38)
+                            VStack(alignment: .leading, spacing: 4) {
+                                // Label showing what the image is currently displaying (below control buttons)
+                                Text(imageDisplayLabel)
+                                    .font(.system(size: 9).bold())
+                                    .foregroundStyle(.white)
+                                    .padding(.horizontal, 6)
+                                    .padding(.vertical, 3)
+                                    .background(.black.opacity(0.5), in: Capsule())
+                                if isSelectMode {
+                                    Label("Drag to select area", systemImage: "rectangle.dashed")
+                                        .font(.system(size: 9, weight: .semibold))
+                                        .foregroundStyle(.black)
+                                        .padding(.horizontal, 6)
+                                        .padding(.vertical, 3)
+                                        .background(.yellow.opacity(0.85), in: Capsule())
+                                }
+                            }
+                            .padding(.leading, 6)
+                            .padding(.top, 38)
                         }
                         .overlay(alignment: .bottomTrailing) {
                             if zoomScale > 1.05 || gestureZoom != 1.0 {
-                                let z = min(8.0, max(1.0, zoomScale * gestureZoom))
+                                let z = min(maxZoom, max(1.0, zoomScale * gestureZoom))
                                 Button {
                                     withAnimation(.easeInOut(duration: 0.3)) {
                                         zoomScale = 1.0
@@ -821,10 +902,18 @@ struct ContentView: View {
                                 .opacity(0.8)
                             }
                         }
+                        .overlay(alignment: .bottomLeading) {
+                            // Scale bar — S2 pixels are 10m
+                            let metersPerScreenPt = 10.0 / (fitScale * currentZoom)
+                            let scaleBarView = ScaleBarView(metersPerPoint: metersPerScreenPt)
+                            scaleBarView
+                                .padding(6)
+                                .opacity(0.85)
+                        }
                         .onAppear { dragStartIndex = currentFrameIndex }
                         .onChange(of: currentFrameIndex) { dragStartIndex = currentFrameIndex }
                     }
-                    .frame(height: CGFloat(frame.height) * min(8, UIScreen.main.bounds.width / CGFloat(frame.width)))
+                    .frame(height: CGFloat(frame.height) * (UIScreen.main.bounds.width / CGFloat(frame.width)))
                     .overlay(alignment: .bottom) {
                         // Static colorbar (not affected by zoom/pan) — tap to toggle
                         if showColorbar && !showBadData {
@@ -1123,47 +1212,40 @@ struct ContentView: View {
 
             let sorted = processor.frames.sorted(by: { $0.date < $1.date })
             let validSorted = sorted.filter { $0.validPixelCount > 0 }
+
+            // Pre-compute chart values once (avoid re-calling per ForEach item)
+            let chartVals = Dictionary(uniqueKeysWithValues: validSorted.map { ($0.id, chartValue(for: $0)) })
+            let pixData: [PixelDataPoint] = isInspectingPixel ? pixelNDVIData(sorted: sorted) : []
+            let fvegPixData: [PixelDataPoint] = isInspectingPixel && !frameUnmixResults.isEmpty ? pixelFvegData(sorted: sorted) : []
+            // Pre-compute DL curves once
+            let dlCurve = dlCurvePoints(sorted: sorted)
+            let pixelCurve = pixelDLCurvePoints(sorted: sorted)
+            let indicatorPts = phenologyIndicatorLines(sorted: sorted)
+            // Pre-compute fraction medians once (avoid 6 x N median sorts per render)
+            let fracVeg: [(id: UUID, date: Date, val: Double)] = !frameUnmixResults.isEmpty
+                ? validSorted.compactMap { f in medianFraction(for: f, param: .fveg).map { (f.id, f.date, $0) } } : []
+            let fracNPV: [(id: UUID, date: Date, val: Double)] = !frameUnmixResults.isEmpty
+                ? validSorted.compactMap { f in medianFraction(for: f, param: .fnpv).map { (f.id, f.date, $0) } } : []
+            let fracSoil: [(id: UUID, date: Date, val: Double)] = !frameUnmixResults.isEmpty
+                ? validSorted.compactMap { f in medianFraction(for: f, param: .fsoil).map { (f.id, f.date, $0) } } : []
+
             Chart {
                 // NDVI line (dimmed when inspecting pixel)
                 ForEach(validSorted) { frame in
                     LineMark(
                         x: .value("Date", frame.date),
-                        y: .value(viLabel, chartValue(for: frame)),
+                        y: .value(viLabel, chartVals[frame.id] ?? 0),
                         series: .value("Series", viLabel)
                     )
                     .foregroundStyle(.green.opacity(isInspectingPixel ? 0.15 : 0.6))
-                    .lineStyle(StrokeStyle(lineWidth: isInspectingPixel ? 1 : 2,
-                                           dash: isInspectingPixel ? [4, 2] : []))
-                }
-
-                // Area max/min envelope (when inspecting pixel, for context)
-                if isInspectingPixel {
-                    ForEach(validSorted) { frame in
-                        LineMark(
-                            x: .value("Date", frame.date),
-                            y: .value(viLabel, maxVI(for: frame)),
-                            series: .value("Series", "Max")
-                        )
-                        .foregroundStyle(.green.opacity(0.1))
-                        .lineStyle(StrokeStyle(lineWidth: 0.5))
-                    }
-                    ForEach(validSorted) { frame in
-                        LineMark(
-                            x: .value("Date", frame.date),
-                            y: .value(viLabel, minVI(for: frame)),
-                            series: .value("Series", "Min")
-                        )
-                        .foregroundStyle(.green.opacity(0.1))
-                        .lineStyle(StrokeStyle(lineWidth: 0.5))
-                    }
+                    .lineStyle(StrokeStyle(lineWidth: isInspectingPixel ? 1 : 1.5,
+                                           dash: [4, 3]))
                 }
 
                 // Per-pixel time series (when inspecting)
                 if isInspectingPixel {
                     if settings.vegetationIndex == .fvc && !frameUnmixResults.isEmpty {
-                        // FVC mode: show only fVeg pixel data
-                        let fvegData = pixelFvegData(sorted: sorted)
-                        ForEach(fvegData) { pt in
+                        ForEach(fvegPixData) { pt in
                             LineMark(
                                 x: .value("Date", pt.date),
                                 y: .value(viLabel, pt.ndvi),
@@ -1173,8 +1255,6 @@ struct ContentView: View {
                             .lineStyle(StrokeStyle(lineWidth: 2))
                         }
                     } else {
-                        // VI mode: show VI pixel data
-                        let pixData = pixelNDVIData(sorted: sorted)
                         ForEach(pixData) { pt in
                             LineMark(
                                 x: .value("Date", pt.date),
@@ -1184,10 +1264,8 @@ struct ContentView: View {
                             .foregroundStyle(.orange.opacity(0.8))
                             .lineStyle(StrokeStyle(lineWidth: 2))
                         }
-                        // Also show fVeg if unmixed (as secondary)
-                        if !frameUnmixResults.isEmpty {
-                            let fvegData = pixelFvegData(sorted: sorted)
-                            ForEach(fvegData) { pt in
+                        if !fvegPixData.isEmpty {
+                            ForEach(fvegPixData) { pt in
                                 LineMark(
                                     x: .value("Date", pt.date),
                                     y: .value(viLabel, pt.ndvi),
@@ -1234,7 +1312,7 @@ struct ContentView: View {
                 ForEach(validSorted) { frame in
                     PointMark(
                         x: .value("Date", frame.date),
-                        y: .value(viLabel, chartValue(for: frame))
+                        y: .value(viLabel, chartVals[frame.id] ?? 0)
                     )
                     .foregroundStyle(.green.opacity(isInspectingPixel ? 0.15 : 1.0))
                     .symbolSize(isInspectingPixel ? 8 : 15)
@@ -1242,7 +1320,6 @@ struct ContentView: View {
 
                 // Per-pixel NDVI dots
                 if isInspectingPixel {
-                    let pixData = pixelNDVIData(sorted: sorted)
                     ForEach(pixData) { pt in
                         PointMark(
                             x: .value("Date", pt.date),
@@ -1284,8 +1361,8 @@ struct ContentView: View {
                         }
                 }
 
-                // Double logistic curves
-                ForEach(dlCurvePoints(sorted: sorted), id: \.id) { pt in
+                // Double logistic curves (pre-computed)
+                ForEach(dlCurve, id: \.id) { pt in
                     LineMark(
                         x: .value("Date", pt.date),
                         y: .value(viLabel, pt.ndvi),
@@ -1295,8 +1372,8 @@ struct ContentView: View {
                     .lineStyle(pt.style)
                 }
 
-                // Pixel DL fit curve (when inspecting)
-                ForEach(pixelDLCurvePoints(sorted: sorted), id: \.id) { pt in
+                // Pixel DL fit curve (pre-computed)
+                ForEach(pixelCurve, id: \.id) { pt in
                     LineMark(
                         x: .value("Date", pt.date),
                         y: .value(viLabel, pt.ndvi),
@@ -1306,8 +1383,8 @@ struct ContentView: View {
                     .lineStyle(pt.style)
                 }
 
-                // Phenology indicator lines (tangent slopes for rsp/rau)
-                ForEach(phenologyIndicatorLines(sorted: sorted), id: \.id) { pt in
+                // Phenology indicator lines (pre-computed)
+                ForEach(indicatorPts, id: \.id) { pt in
                     LineMark(
                         x: .value("Date", pt.date),
                         y: .value(viLabel, pt.ndvi),
@@ -1317,65 +1394,37 @@ struct ContentView: View {
                     .lineStyle(StrokeStyle(lineWidth: 2.5))
                 }
 
-                // Fraction time series (when unmixing results exist)
-                if !frameUnmixResults.isEmpty {
-                    // In FVC mode, fVeg is the main series (shown as median line), skip dashed duplicate
+                // Fraction time series (pre-computed)
+                if !fracVeg.isEmpty || !fracNPV.isEmpty || !fracSoil.isEmpty {
                     if settings.vegetationIndex != .fvc {
-                        ForEach(validSorted) { frame in
-                            if let fv = medianFraction(for: frame, param: .fveg) {
-                                LineMark(
-                                    x: .value("Date", frame.date),
-                                    y: .value(viLabel, fv),
-                                    series: .value("Series", "fVeg")
-                                )
+                        ForEach(fracVeg, id: \.id) { pt in
+                            LineMark(x: .value("Date", pt.date), y: .value(viLabel, pt.val), series: .value("Series", "fVeg"))
                                 .foregroundStyle(.green.opacity(0.6))
                                 .lineStyle(StrokeStyle(lineWidth: 1.5, dash: [6, 3]))
-                            }
                         }
                     }
-                    ForEach(validSorted) { frame in
-                        if let fn = medianFraction(for: frame, param: .fnpv) {
-                            LineMark(
-                                x: .value("Date", frame.date),
-                                y: .value(viLabel, fn),
-                                series: .value("Series", "fNPV")
-                            )
+                    ForEach(fracNPV, id: \.id) { pt in
+                        LineMark(x: .value("Date", pt.date), y: .value(viLabel, pt.val), series: .value("Series", "fNPV"))
                             .foregroundStyle(.yellow.opacity(0.6))
                             .lineStyle(StrokeStyle(lineWidth: 1.5, dash: [6, 3]))
-                        }
                     }
-                    ForEach(validSorted) { frame in
-                        if let fs = medianFraction(for: frame, param: .fsoil) {
-                            LineMark(
-                                x: .value("Date", frame.date),
-                                y: .value(viLabel, fs),
-                                series: .value("Series", "fSoil")
-                            )
+                    ForEach(fracSoil, id: \.id) { pt in
+                        LineMark(x: .value("Date", pt.date), y: .value(viLabel, pt.val), series: .value("Series", "fSoil"))
                             .foregroundStyle(soilBrown.opacity(0.5))
                             .lineStyle(StrokeStyle(lineWidth: 1.5, dash: [6, 3]))
-                        }
                     }
                     // Fraction data point dots
-                    ForEach(validSorted) { frame in
-                        if let fv = medianFraction(for: frame, param: .fveg) {
-                            PointMark(x: .value("Date", frame.date), y: .value(viLabel, fv))
-                                .foregroundStyle(.green.opacity(0.7))
-                                .symbolSize(12)
-                        }
+                    ForEach(fracVeg, id: \.id) { pt in
+                        PointMark(x: .value("Date", pt.date), y: .value(viLabel, pt.val))
+                            .foregroundStyle(.green.opacity(0.7)).symbolSize(12)
                     }
-                    ForEach(validSorted) { frame in
-                        if let fn = medianFraction(for: frame, param: .fnpv) {
-                            PointMark(x: .value("Date", frame.date), y: .value(viLabel, fn))
-                                .foregroundStyle(.yellow.opacity(0.7))
-                                .symbolSize(12)
-                        }
+                    ForEach(fracNPV, id: \.id) { pt in
+                        PointMark(x: .value("Date", pt.date), y: .value(viLabel, pt.val))
+                            .foregroundStyle(.yellow.opacity(0.7)).symbolSize(12)
                     }
-                    ForEach(validSorted) { frame in
-                        if let fs = medianFraction(for: frame, param: .fsoil) {
-                            PointMark(x: .value("Date", frame.date), y: .value(viLabel, fs))
-                                .foregroundStyle(soilBrown.opacity(0.7))
-                                .symbolSize(12)
-                        }
+                    ForEach(fracSoil, id: \.id) { pt in
+                        PointMark(x: .value("Date", pt.date), y: .value(viLabel, pt.val))
+                            .foregroundStyle(soilBrown.opacity(0.7)).symbolSize(12)
                     }
                 }
             }
@@ -1400,7 +1449,8 @@ struct ContentView: View {
                 }
             }
             .chartYScale(domain: chartYDomain)
-            .frame(height: 140)
+            .frame(maxWidth: .infinity)
+            .frame(height: 200)
             .contentShape(Rectangle())
             .gesture(
                 DragGesture(minimumDistance: 5)
@@ -1443,6 +1493,7 @@ struct ContentView: View {
             if isInspectingPixel, currentFrameIndex < processor.frames.count {
                 let cf = processor.frames[currentFrameIndex]
                 if let ur = frameUnmixResults[cf.id],
+                   inspectedPixelRow >= 0, inspectedPixelCol >= 0,
                    inspectedPixelRow < ur.height, inspectedPixelCol < ur.width {
                     let fv = ur.fveg[inspectedPixelRow][inspectedPixelCol]
                     if !fv.isNaN {
@@ -1562,9 +1613,122 @@ struct ContentView: View {
             frameUnmixResults = results
             isRunningUnmix = false
             log.success("Unmixing done: \(results.count) frames, fVeg/fNPV/fSoil/RMSE maps available in Live menu")
-            // Auto-refit if VI is FVC
-            if settings.vegetationIndex == .fvc && dlBest != nil {
-                runDLFit()
+            // Auto-fit DL to all fraction time series
+            fitAllFractions()
+        }
+    }
+
+    /// Fit DL curves to FVC, NPV, and Soil median time series after unmixing.
+    /// For FVC: try fixed (mn=0,mx=1) and free magnitude, pick better.
+    /// For NPV/Soil: try free magnitude DL (allows inverted curves).
+    private func fitAllFractions() {
+        let refYr = referenceYear
+        let fracs: [PhenologyParameter] = [.fveg, .fnpv, .fsoil]
+        let minSL = Double(settings.minSeasonLength)
+        let maxSL = Double(settings.maxSeasonLength)
+        let p = settings.pixelPerturbation
+        let sp = settings.pixelSlopePerturbation
+        let dlBounds: (lo: [Double], hi: [Double]) = (
+            [settings.boundMnMin, settings.boundDeltaMin, settings.boundSosMin, settings.boundRspMin, max(minSL, 10), settings.boundRauMin],
+            [settings.boundMnMax, settings.boundDeltaMax, settings.boundSosMax, settings.boundRspMax, min(maxSL, 350), settings.boundRauMax]
+        )
+
+        // Build data arrays for each fraction
+        var fracData: [PhenologyParameter: [DoubleLogistic.DataPoint]] = [:]
+        for param in fracs {
+            let data = processor.frames.filter { $0.validPixelCount > 0 }.compactMap { f -> DoubleLogistic.DataPoint? in
+                guard let val = medianFraction(for: f, param: param) else { return nil }
+                return DoubleLogistic.DataPoint(doy: Double(f.continuousDOY(referenceYear: refYr)), ndvi: val)
+            }
+            if data.count >= 4 { fracData[param] = data }
+        }
+
+        guard !fracData.isEmpty else { return }
+        log.info("Fitting DL to fraction time series: \(fracData.keys.map(\.rawValue).joined(separator: ", "))")
+
+        Task.detached(priority: .utility) {
+            var fits: [PhenologyParameter: DLParams] = [:]
+
+            for (param, data) in fracData {
+                let filtered = DoubleLogistic.filterCycleContamination(data: data)
+                let guess = DoubleLogistic.initialGuess(data: filtered)
+
+                // Try 1: Fixed fraction mode (mn=0, mx=1)
+                let fixedResult = DoubleLogistic.ensembleFit(
+                    data: data, nRuns: 30, perturbation: p, slopePerturbation: sp,
+                    minSeasonLength: minSL, maxSeasonLength: maxSL,
+                    slopeSymmetry: Double(settings.slopeSymmetry),
+                    bounds: dlBounds, fractionMode: true
+                )
+
+                // Try 2: Free magnitude (mn, mx free within [0,1])
+                let freeGuess: DLParams
+                if param == .fveg {
+                    // FVC: start from low mn, high mx
+                    let mnGuess = max(0, data.map(\.ndvi).min() ?? 0)
+                    let mxGuess = min(1, data.map(\.ndvi).max() ?? 1)
+                    freeGuess = DLParams(mn: mnGuess, mx: mxGuess, sos: guess.sos, rsp: guess.rsp, eos: guess.eos, rau: guess.rau)
+                } else {
+                    // NPV/Soil: may be inverted (starts high, drops during growing season)
+                    let vals = data.map(\.ndvi).sorted()
+                    let mnGuess = vals.first ?? 0
+                    let mxGuess = vals.last ?? 1
+                    // Try both orientations
+                    freeGuess = DLParams(mn: mnGuess, mx: mxGuess, sos: guess.sos, rsp: guess.rsp, eos: guess.eos, rau: guess.rau)
+                }
+
+                var freeBest = DoubleLogistic.fitFreeFraction(
+                    data: filtered, initial: freeGuess,
+                    minSeasonLength: minSL, maxSeasonLength: maxSL,
+                    slopeSymmetry: Double(settings.slopeSymmetry),
+                    bounds: dlBounds
+                )
+
+                // For NPV/Soil, also try inverted initial guess
+                if param == .fnpv || param == .fsoil {
+                    let invertedGuess = DLParams(mn: freeGuess.mx, mx: freeGuess.mn,
+                                                  sos: guess.sos, rsp: guess.rsp, eos: guess.eos, rau: guess.rau)
+                    let invertedFit = DoubleLogistic.fitFreeFraction(
+                        data: filtered, initial: invertedGuess,
+                        minSeasonLength: minSL, maxSeasonLength: maxSL,
+                        slopeSymmetry: Double(settings.slopeSymmetry),
+                        bounds: dlBounds
+                    )
+                    if invertedFit.rmse < freeBest.rmse {
+                        freeBest = invertedFit
+                    }
+                }
+
+                // Pick the better fit
+                let best: DLParams
+                let mode: String
+                if freeBest.rmse < fixedResult.best.rmse {
+                    best = freeBest
+                    mode = "free mn=\(String(format: "%.2f", best.mn)) mx=\(String(format: "%.2f", best.mx))"
+                } else {
+                    best = fixedResult.best
+                    mode = "fixed mn=0 mx=1"
+                }
+                fits[param] = best
+
+                await MainActor.run {
+                    let rmseStr = String(format: "%.4f", best.rmse)
+                    if best.rmse > 0.15 {
+                        log.warn("  \(param.rawValue) DL: RMSE=\(rmseStr) (\(mode)) — poor fit")
+                    } else {
+                        log.success("  \(param.rawValue) DL: RMSE=\(rmseStr) (\(mode))")
+                    }
+                }
+            }
+
+            await MainActor.run {
+                fractionDLFits = fits
+                // If currently viewing FVC, use its fit as dlBest
+                if let fvcFit = fits[.fveg] {
+                    dlBest = fvcFit
+                    dlEnsemble = []
+                    dlSliders = fvcFit
+                }
             }
         }
     }
@@ -1582,7 +1746,7 @@ struct ContentView: View {
         var result = [(nm: Double, refl: Double, band: String)]()
 
         func singlePixel(_ band: [[UInt16]]?, row: Int, col: Int) -> Double? {
-            guard let b = band, row < b.count, col < b[row].count else { return nil }
+            guard let b = band, row >= 0, col >= 0, row < b.count, col < b[row].count else { return nil }
             let dn = b[row][col]
             guard dn > 0, dn < 65535 else { return nil }
             return Double((Float(dn) + ofs) / 10000.0)
@@ -1675,9 +1839,6 @@ struct ContentView: View {
             pixelCol: usePixel ? inspectedPixelCol : nil
         )
 
-        let peakFrame = sorted.max(by: { $0.medianNDVI < $1.medianNDVI })
-        let minFrame = sorted.min(by: { $0.medianNDVI < $1.medianNDVI })
-
         struct SpectralPt: Identifiable {
             let id: String
             let nm: Double
@@ -1711,7 +1872,7 @@ struct ContentView: View {
                 let mid = s.count / 2
                 let median = s.count % 2 == 0 ? (s[mid - 1] + s[mid]) / 2 : s[mid]
                 envelopePts.append(EnvelopePt(id: "env_\(bw.band)", nm: bw.nm,
-                                              lo: s.first!, hi: s.last!))
+                                              lo: s[0], hi: s[s.count - 1]))
                 pts.append(SpectralPt(id: "med_\(bw.band)", nm: bw.nm, refl: median,
                                       series: "Median", band: bw.band))
             }
@@ -1723,33 +1884,14 @@ struct ContentView: View {
                                   series: "Current", band: v.band))
         }
 
-        // Peak frame
-        if let peak = peakFrame, peak.id != current.id {
-            let pv = spectralValues(frame: peak,
-                                    pixelRow: usePixel ? inspectedPixelRow : nil,
-                                    pixelCol: usePixel ? inspectedPixelCol : nil)
-            for v in pv {
-                pts.append(SpectralPt(id: "peak_\(v.band)", nm: v.nm, refl: v.refl,
-                                      series: "Peak", band: v.band))
-            }
-        }
-
-        // Lowest-NDVI frame
-        if let mn = minFrame, mn.id != current.id, mn.id != peakFrame?.id {
-            let mv = spectralValues(frame: mn,
-                                    pixelRow: usePixel ? inspectedPixelRow : nil,
-                                    pixelCol: usePixel ? inspectedPixelCol : nil)
-            for v in mv {
-                pts.append(SpectralPt(id: "low_\(v.band)", nm: v.nm, refl: v.refl,
-                                      series: "Low", band: v.band))
-            }
-        }
+        // Envelope + median provide all the context; no Peak/Min lines needed
 
         // Predicted spectrum and endmember spectra from unmixing
         var hasUnmix = false
         if let unmixResult = frameUnmixResults[current.id] {
             let fracs: UnmixResult?
-            if usePixel, inspectedPixelRow < unmixResult.height, inspectedPixelCol < unmixResult.width {
+            if usePixel, inspectedPixelRow >= 0, inspectedPixelCol >= 0,
+               inspectedPixelRow < unmixResult.height, inspectedPixelCol < unmixResult.width {
                 let fv = unmixResult.fveg[inspectedPixelRow][inspectedPixelCol]
                 let fn = unmixResult.fnpv[inspectedPixelRow][inspectedPixelCol]
                 let fs = unmixResult.fsoil[inspectedPixelRow][inspectedPixelCol]
@@ -1766,35 +1908,48 @@ struct ContentView: View {
             let endmembers = EndmemberLibrary.defaults
 
             if let f = fracs {
-                // Interpolate endmember spectra at 5nm resolution, scaled by fractions
                 let fractionValues: [Float] = [f.fveg, f.fnpv, f.fsoil]
                 let seriesNames = ["GV scaled", "NPV scaled", "Soil scaled"]
-                for (ei, em) in endmembers.enumerated() {
+                let fullSpecs = EndmemberLibrary.fullResolution
+
+                // Plot scaled endmember spectra using full-resolution USGS data
+                for (ei, _) in endmembers.enumerated() {
                     let frac = Double(fractionValues[ei])
                     guard frac > 0.01 else { continue }
-                    let emVals = em.values.sorted(by: { $0.nm < $1.nm })
-                    let nms = emVals.map(\.nm)
-                    let refls = emVals.map(\.reflectance)
-                    // Interpolate at 5nm from first to last wavelength
-                    var nm = nms.first!
-                    while nm <= nms.last! {
-                        let refl = linearInterpolate(x: nm, xs: nms, ys: refls)
-                        pts.append(SpectralPt(id: "\(seriesNames[ei])_\(Int(nm))", nm: nm,
-                                              refl: refl * frac,
-                                              series: seriesNames[ei], band: ""))
-                        nm += 5
+                    if let full = fullSpecs[ei] {
+                        // Full-resolution (5nm step) from USGS library
+                        for pt in full.subsampled(step: 5) {
+                            pts.append(SpectralPt(id: "\(seriesNames[ei])_\(Int(pt.nm))", nm: pt.nm,
+                                                  refl: pt.reflectance * frac,
+                                                  series: seriesNames[ei], band: ""))
+                        }
+                    } else {
+                        // Fallback: interpolate from S2 band values
+                        let emVals = endmembers[ei].values.sorted(by: { $0.nm < $1.nm })
+                        guard !emVals.isEmpty else { continue }
+                        let nms = emVals.map(\.nm); let refls = emVals.map(\.reflectance)
+                        var nm = nms[0]
+                        while nm <= nms[nms.count - 1] {
+                            let refl = linearInterpolate(x: nm, xs: nms, ys: refls)
+                            pts.append(SpectralPt(id: "\(seriesNames[ei])_\(Int(nm))", nm: nm,
+                                                  refl: refl * frac, series: seriesNames[ei], band: ""))
+                            nm += 5
+                        }
                     }
                 }
-                // Predicted total spectrum at 5nm resolution
-                let emAll = endmembers.map { $0.values.sorted(by: { $0.nm < $1.nm }) }
-                let nms0 = emAll[0].map(\.nm)
-                var nm = nms0.first!
-                while nm <= nms0.last! {
+                // Predicted total spectrum at 5nm using full-resolution data
+                let nmMin = fullSpecs.compactMap { $0?.points.first?.nm }.max() ?? 400
+                let nmMax = fullSpecs.compactMap { $0?.points.last?.nm }.min() ?? 2400
+                var nm = nmMin
+                while nm <= nmMax {
                     var total = 0.0
-                    for (ei, emVals) in emAll.enumerated() {
-                        let xs = emVals.map(\.nm)
-                        let ys = emVals.map(\.reflectance)
-                        total += Double(fractionValues[ei]) * linearInterpolate(x: nm, xs: xs, ys: ys)
+                    for (ei, _) in endmembers.enumerated() {
+                        if let full = fullSpecs[ei], let r = full.interpolated(at: nm) {
+                            total += Double(fractionValues[ei]) * r
+                        } else {
+                            let emVals = endmembers[ei].values.sorted(by: { $0.nm < $1.nm })
+                            total += Double(fractionValues[ei]) * linearInterpolate(x: nm, xs: emVals.map(\.nm), ys: emVals.map(\.reflectance))
+                        }
                     }
                     pts.append(SpectralPt(id: "pred_\(Int(nm))", nm: nm, refl: total,
                                           series: "Predicted", band: ""))
@@ -1803,22 +1958,36 @@ struct ContentView: View {
             }
         }
 
+        // Always show unscaled reference endmember spectra (full-res USGS) as faint background
+        let hasFullSpec = EndmemberLibrary.fullResolution.compactMap({ $0 }).count > 0
+        if hasFullSpec && !hasUnmix {
+            let refNames = ["GV ref", "NPV ref", "Soil ref"]
+            for (ei, full) in EndmemberLibrary.fullResolution.enumerated() {
+                guard let f = full else { continue }
+                for pt in f.subsampled(step: 10) {
+                    pts.append(SpectralPt(id: "\(refNames[ei])_\(Int(pt.nm))", nm: pt.nm,
+                                          refl: pt.reflectance,
+                                          series: refNames[ei], band: ""))
+                }
+            }
+        }
+
         // Dynamic Y/X scale
         let maxRefl = max(0.5, (envelopePts.map(\.hi) + pts.map(\.refl)).max() ?? 0.5)
         let yTop = ceil(maxRefl * 10) / 10  // round up to nearest 0.1
-        let xMax: Double = hasUnmix ? 2300 : 900
+        let xMax: Double = (hasUnmix || hasFullSpec) ? 2500 : 900
 
         // Build color map
         var colorMap: KeyValuePairs<String, Color> {
             [
                 "Current": Color.red,
-                "Peak": Color.green.opacity(0.7),
-                "Low": Color.blue.opacity(0.7),
-                "Median": Color.gray,
                 "Predicted": Color.purple.opacity(0.8),
                 "GV scaled": Color.green.opacity(0.7),
                 "NPV scaled": Color.yellow.opacity(0.7),
-                "Soil scaled": soilBrown.opacity(0.7)
+                "Soil scaled": soilBrown.opacity(0.7),
+                "GV ref": Color.green.opacity(0.3),
+                "NPV ref": Color.yellow.opacity(0.3),
+                "Soil ref": soilBrown.opacity(0.3)
             ]
         }
 
@@ -1835,7 +2004,7 @@ struct ContentView: View {
             }
 
             // Line + point marks for each series
-            let isEndmember = { (s: String) in s == "GV scaled" || s == "NPV scaled" || s == "Soil scaled" }
+            let isModelCurve = { (s: String) in s == "GV scaled" || s == "NPV scaled" || s == "Soil scaled" || s == "GV ref" || s == "NPV ref" || s == "Soil ref" }
             ForEach(pts) { pt in
                 LineMark(
                     x: .value("Wavelength (nm)", pt.nm),
@@ -1844,12 +2013,12 @@ struct ContentView: View {
                 )
                 .foregroundStyle(by: .value("Series", pt.series))
                 .lineStyle(StrokeStyle(
-                    lineWidth: pt.series == "Current" ? 2.5 : (isEndmember(pt.series) ? 2.0 : (pt.series == "Predicted" ? 1.2 : 1.5)),
-                    dash: pt.series == "Current" ? [] : (isEndmember(pt.series) ? [3, 1] : (pt.series == "Predicted" ? [3, 2] : [4, 2]))))
+                    lineWidth: pt.series == "Current" ? 2.5 : (isModelCurve(pt.series) ? (pt.series.hasSuffix("ref") ? 1.0 : 2.0) : (pt.series == "Predicted" ? 1.2 : 1.5)),
+                    dash: pt.series == "Current" ? [] : (isModelCurve(pt.series) ? [3, 1] : (pt.series == "Predicted" ? [3, 2] : [4, 2]))))
                 .interpolationMethod(.catmullRom)
             }
             // Point marks (only for actual data series, not model curves)
-            ForEach(pts.filter { !isEndmember($0.series) && $0.series != "Predicted" }) { pt in
+            ForEach(pts.filter { !isModelCurve($0.series) && $0.series != "Predicted" }) { pt in
                 PointMark(
                     x: .value("Wavelength (nm)", pt.nm),
                     y: .value("Reflectance", pt.refl)
@@ -1869,7 +2038,7 @@ struct ContentView: View {
         .chartXScale(domain: 400...xMax)
         .chartYScale(domain: 0...yTop)
         .chartXAxis {
-            AxisMarks(values: hasUnmix ? [490, 665, 842, 1200, 1610, 2190] : [450, 500, 560, 665, 750, 842]) { value in
+            AxisMarks(values: (hasUnmix || hasFullSpec) ? [490, 665, 842, 1200, 1610, 2190] : [450, 500, 560, 665, 750, 842]) { value in
                 AxisGridLine()
                 AxisValueLabel {
                     if let v = value.as(Double.self) {
@@ -1890,28 +2059,59 @@ struct ContentView: View {
                 }
             }
         }
-        .chartLegend(.visible)
+        .chartLegend(.hidden)
+        .frame(maxWidth: .infinity)
         .frame(height: 160)
+        .clipped()
         .overlay(alignment: .bottom) {
-            Text("Wavelength (nm)")
-                .font(.system(size: 7))
-                .foregroundStyle(.secondary)
-                .offset(y: -2)
+            VStack(spacing: 1) {
+                // Compact 2-line legend
+                let legendItems: [(String, Color)] = [
+                    ("Current", .red), ("Envelope", .gray.opacity(0.3))
+                ] + (hasUnmix ? [
+                    ("Predicted", .purple), ("GV", .green), ("NPV", .yellow), ("Soil", soilBrown)
+                ] : (hasFullSpec ? [
+                    ("GV ref", .green), ("NPV ref", .yellow), ("Soil ref", soilBrown)
+                ] : []))
+                let half = (legendItems.count + 1) / 2
+                HStack(spacing: 6) {
+                    ForEach(legendItems.prefix(half), id: \.0) { name, color in
+                        HStack(spacing: 2) {
+                            Circle().fill(color).frame(width: 5, height: 5)
+                            Text(name).font(.system(size: 7)).foregroundStyle(.secondary)
+                        }
+                    }
+                }
+                HStack(spacing: 6) {
+                    ForEach(legendItems.dropFirst(half).map { $0 }, id: \.0) { name, color in
+                        HStack(spacing: 2) {
+                            Circle().fill(color).frame(width: 5, height: 5)
+                            Text(name).font(.system(size: 7)).foregroundStyle(.secondary)
+                        }
+                    }
+                }
+                Text("Wavelength (nm)")
+                    .font(.system(size: 7))
+                    .foregroundStyle(.secondary)
+            }
+            .offset(y: -2)
         }
     }
 
     /// Linear interpolation in a sorted array of (x, y) pairs.
     private func linearInterpolate(x: Double, xs: [Double], ys: [Double]) -> Double {
         guard xs.count == ys.count, !xs.isEmpty else { return 0 }
-        if x <= xs.first! { return ys.first! }
-        if x >= xs.last! { return ys.last! }
+        if x <= xs[0] { return ys[0] }
+        if x >= xs[xs.count - 1] { return ys[ys.count - 1] }
         for i in 1..<xs.count {
             if x <= xs[i] {
-                let t = (x - xs[i-1]) / (xs[i] - xs[i-1])
+                let denom = xs[i] - xs[i-1]
+                guard denom != 0 else { continue }
+                let t = (x - xs[i-1]) / denom
                 return ys[i-1] + t * (ys[i] - ys[i-1])
             }
         }
-        return ys.last!
+        return ys[ys.count - 1]
     }
 
     // MARK: - Double Logistic Curve Data
@@ -1992,26 +2192,58 @@ struct ContentView: View {
             }
         }
 
-        // Fraction model curves (fSoil single decreasing logistic, fNPV single increasing logistic)
-        // Soil: 1→0 at SOS (rate=rsp), NPV: 0→1 at EOS (rate=rau)
-        if let dl = dlBest, !frameUnmixResults.isEmpty {
+        // Fraction model curves: use per-fraction DL fits if available,
+        // otherwise fall back to single-logistic approximation from FVC params.
+        if !frameUnmixResults.isEmpty {
             let ghost = isInspectingPixel
-            for cdoy in cdoys {
-                if let d = dateForCDOY(cdoy) {
-                    pts.append(DLCurvePoint(
-                        id: "fsoil_\(cdoy)", date: d,
-                        ndvi: dl.evaluateSoilFraction(t: Double(cdoy)),
-                        series: "fSoil-fit",
-                        color: soilBrown.opacity(ghost ? 0.3 : 0.7),
-                        style: StrokeStyle(lineWidth: ghost ? 1 : 2)
-                    ))
-                    pts.append(DLCurvePoint(
-                        id: "fnpv_\(cdoy)", date: d,
-                        ndvi: dl.evaluateNPVFraction(t: Double(cdoy)),
-                        series: "fNPV-fit",
-                        color: .yellow.opacity(ghost ? 0.3 : 0.7),
-                        style: StrokeStyle(lineWidth: ghost ? 1 : 2)
-                    ))
+            if let soilFit = fractionDLFits[.fsoil] {
+                for cdoy in cdoys {
+                    if let d = dateForCDOY(cdoy) {
+                        pts.append(DLCurvePoint(
+                            id: "fsoil_\(cdoy)", date: d,
+                            ndvi: soilFit.evaluate(t: Double(cdoy)),
+                            series: "fSoil-fit",
+                            color: soilBrown.opacity(ghost ? 0.3 : 0.7),
+                            style: StrokeStyle(lineWidth: ghost ? 1 : 2)
+                        ))
+                    }
+                }
+            } else if let dl = dlBest {
+                for cdoy in cdoys {
+                    if let d = dateForCDOY(cdoy) {
+                        pts.append(DLCurvePoint(
+                            id: "fsoil_\(cdoy)", date: d,
+                            ndvi: dl.evaluateSoilFraction(t: Double(cdoy)),
+                            series: "fSoil-fit",
+                            color: soilBrown.opacity(ghost ? 0.3 : 0.7),
+                            style: StrokeStyle(lineWidth: ghost ? 1 : 2)
+                        ))
+                    }
+                }
+            }
+            if let npvFit = fractionDLFits[.fnpv] {
+                for cdoy in cdoys {
+                    if let d = dateForCDOY(cdoy) {
+                        pts.append(DLCurvePoint(
+                            id: "fnpv_\(cdoy)", date: d,
+                            ndvi: npvFit.evaluate(t: Double(cdoy)),
+                            series: "fNPV-fit",
+                            color: .yellow.opacity(ghost ? 0.3 : 0.7),
+                            style: StrokeStyle(lineWidth: ghost ? 1 : 2)
+                        ))
+                    }
+                }
+            } else if let dl = dlBest {
+                for cdoy in cdoys {
+                    if let d = dateForCDOY(cdoy) {
+                        pts.append(DLCurvePoint(
+                            id: "fnpv_\(cdoy)", date: d,
+                            ndvi: dl.evaluateNPVFraction(t: Double(cdoy)),
+                            series: "fNPV-fit",
+                            color: .yellow.opacity(ghost ? 0.3 : 0.7),
+                            style: StrokeStyle(lineWidth: ghost ? 1 : 2)
+                        ))
+                    }
                 }
             }
         }
@@ -2274,6 +2506,7 @@ struct ContentView: View {
         guard isInspectingPixel else { return [] }
         return sorted.compactMap { frame in
             guard let result = frameUnmixResults[frame.id],
+                  inspectedPixelRow >= 0, inspectedPixelCol >= 0,
                   inspectedPixelRow < result.height, inspectedPixelCol < result.width else { return nil }
             let fv = result.fveg[inspectedPixelRow][inspectedPixelCol]
             guard !fv.isNaN else { return nil }
@@ -2335,45 +2568,54 @@ struct ContentView: View {
 
     private var liveMenu: some View {
         Menu {
-            Button {
-                phenologyDisplayParam = nil
-                showBadData = false
-                startPlayback()
-            } label: {
-                if phenologyDisplayParam == nil && !showBadData {
-                    Label(liveDisplayName, systemImage: "checkmark")
-                } else {
-                    Text(liveDisplayName)
-                }
+            // Imagery display modes
+            liveMenuItem("NDVI", mode: .ndvi, icon: "leaf")
+            liveMenuItem("FCC (NIR-R-G)", mode: .fcc, icon: "camera.filters")
+            liveMenuItem("True Color (R-G-B)", mode: .rcc, icon: "photo")
+            liveMenuItem("SCL", mode: .scl, icon: "square.grid.3x3")
+            Menu("Bands") {
+                liveMenuItem("Red (B04)", mode: .bandRed, icon: "circle.fill")
+                liveMenuItem("NIR (B08)", mode: .bandNIR, icon: "circle.fill")
+                liveMenuItem("Green (B03)", mode: .bandGreen, icon: "circle.fill")
+                liveMenuItem("Blue (B02)", mode: .bandBlue, icon: "circle.fill")
             }
+            // Phenology parameter maps (when fitted)
             if pixelPhenology != nil {
-                Divider()
-                ForEach(PhenologyParameter.phenologyCases, id: \.self) { param in
-                    Button {
-                        phenologyDisplayParam = param
-                        showBadData = false
-                        stopPlayback()
-                    } label: {
-                        if phenologyDisplayParam == param && !showBadData {
-                            Label(param.rawValue, systemImage: "checkmark")
-                        } else {
-                            Text(param.rawValue)
+                Menu("Phenology") {
+                    ForEach(PhenologyParameter.phenologyCases, id: \.self) { param in
+                        Button {
+                            phenologyDisplayParam = param
+                            showBadData = false
+                            stopPlayback()
+                        } label: {
+                            if phenologyDisplayParam == param && !showBadData {
+                                Label(param.rawValue, systemImage: "checkmark")
+                            } else {
+                                Text(param.rawValue)
+                            }
                         }
                     }
                 }
             }
+            // Fraction maps (when unmixed)
             if !frameUnmixResults.isEmpty {
-                Divider()
-                ForEach(PhenologyParameter.fractionCases, id: \.self) { param in
-                    Button {
-                        phenologyDisplayParam = param
-                        showBadData = false
-                        startPlayback()
-                    } label: {
-                        if phenologyDisplayParam == param && !showBadData {
-                            Label(param.rawValue, systemImage: "checkmark")
-                        } else {
-                            Text(param.rawValue)
+                Menu("Fractions") {
+                    ForEach(PhenologyParameter.fractionCases, id: \.self) { param in
+                        Button {
+                            phenologyDisplayParam = param
+                            showBadData = false
+                            // Use per-fraction DL fit if available
+                            if let fit = fractionDLFits[param] {
+                                dlBest = fit
+                                dlSliders = fit
+                            }
+                            startPlayback()
+                        } label: {
+                            if phenologyDisplayParam == param && !showBadData {
+                                Label(param.rawValue, systemImage: "checkmark")
+                            } else {
+                                Text(param.rawValue)
+                            }
                         }
                     }
                 }
@@ -2405,6 +2647,22 @@ struct ContentView: View {
             .background(.ultraThinMaterial, in: Capsule())
         }
         .tint(showBadData ? .red : (phenologyDisplayParam != nil ? .orange : .green))
+    }
+
+    @ViewBuilder
+    private func liveMenuItem(_ title: String, mode: AppSettings.DisplayMode, icon: String) -> some View {
+        Button {
+            phenologyDisplayParam = nil
+            showBadData = false
+            settings.displayMode = mode
+            startPlayback()
+        } label: {
+            if settings.displayMode == mode && phenologyDisplayParam == nil && !showBadData {
+                Label(title, systemImage: "checkmark")
+            } else {
+                Label(title, systemImage: icon)
+            }
+        }
     }
 
     // MARK: - Phenology (Double Logistic)
@@ -3016,33 +3274,93 @@ struct ContentView: View {
         }
     }
 
+    /// When AOI sheet dismisses, retry fetch if no data loaded yet.
+    private func onAOIDismiss() {
+        if processor.frames.isEmpty && settings.aoiGeometry != nil && processor.status == .idle {
+            startFetch()
+        }
+    }
+
+    /// Reset all state for a new AOI — cancel in-flight work, free memory, then restart.
+    private func resetForNewAOI() {
+        // Cancel all in-progress work first
+        fetchTask?.cancel()
+        fetchTask = nil
+        processor.cancelFetch()
+        pixelFitTask?.cancel()
+        pixelFitTask = nil
+        stopPlayback()
+
+        // Reset frame index
+        currentFrameIndex = 0
+
+        // Free large data structures immediately
+        frameUnmixResults = [:]
+        processor.resetGeometry()
+        processor.frames = []
+        processor.progress = 0
+        processor.progressMessage = ""
+        processor.errorMessage = nil
+        basemapImage = nil
+
+        // Clear phenology
+        dlBest = nil
+        dlEnsemble = []
+        fractionDLFits = [:]
+        dlSliders = DLParams(mn: 0.1, mx: 0.7, sos: 120, rsp: 0.05, eos: 280, rau: 0.05)
+        pixelPhenology = nil
+        pixelPhenologyBase = nil
+        unfilteredPhenology = nil
+        pixelFitProgress = 0
+        isRunningPixelFit = false
+        isClusterFiltered = false
+        phenologyDisplayParam = nil
+        showBadData = false
+        isRunningUnmix = false
+        unmixProgress = 0
+
+        // Clear pixel inspection + selection
+        isInspectingPixel = false
+        isSelectMode = false
+        selectionItem = nil
+        zoomScale = 1.0
+        panOffset = .zero
+
+        // Delay restart slightly to allow cancellation to propagate
+        processor.status = .idle
+        Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(100))
+            startFetch()
+        }
+    }
+
     private func startFetch() {
         log.clear()
 
-        // Use existing AOI geometry, or load bundled default on first launch
+        // Use existing AOI geometry, or pick a random crop field on first launch
         let geometry: GeoJSONGeometry
         if let existing = settings.aoiGeometry {
             geometry = existing
             log.info("Using AOI: \(settings.aoiSourceLabel)")
         } else {
-            log.info("Loading default GeoJSON from bundle...")
-            guard let geojsonURL = Bundle.main.url(forResource: "SF_field", withExtension: "geojson") else {
-                processor.errorMessage = "SF_field.geojson not found in bundle"
-                processor.status = .error
-                log.error("SF_field.geojson not found in app bundle")
-                return
-            }
-            do {
-                geometry = try loadGeoJSON(from: geojsonURL)
-                settings.aoiSource = .bundled
-                settings.aoiGeometry = geometry
-                settings.recordAOI()
-            } catch {
-                processor.errorMessage = error.localizedDescription
-                processor.status = .error
-                log.error("Failed to load GeoJSON: \(error.localizedDescription)")
-                return
-            }
+            // Pick a random crop field from any region
+            let source = CropMapSource.allCases.randomElement() ?? CropMapSource.usaCDL
+            let sample = source.randomField()
+            let verts = source.fieldPolygon(for: sample)
+            geometry = AOIGeometry.fromVertices(verts)
+            settings.aoiSource = .cropSample(crop: sample.crop, region: sample.region, sowMonth: sample.plantingMonth, harvMonth: sample.harvestMonth)
+            settings.aoiGeometry = geometry
+            settings.recordAOI()
+            // Set dates from crop calendar
+            let dates = CropMapSource.dateRange(
+                plantingMonth: sample.plantingMonth,
+                harvestMonth: sample.harvestMonth,
+                year: Calendar.current.component(.year, from: Date()) - 1
+            )
+            settings.startDate = dates.start
+            settings.endDate = dates.end
+            let monthNames = Calendar.current.shortMonthSymbols
+            log.info("Random field: \(sample.crop), \(sample.region) (\(monthNames[sample.plantingMonth - 1])\u{2013}\(monthNames[sample.harvestMonth - 1]))")
         }
 
         log.success("AOI loaded: \(geometry.polygon.count) vertices")
@@ -3068,7 +3386,8 @@ struct ContentView: View {
     }
 
     private func launchFetch(geometry: GeoJSONGeometry) {
-        Task {
+        fetchTask?.cancel()
+        fetchTask = Task {
             await processor.fetch(
                 geometry: geometry,
                 startDate: settings.startDateString,
@@ -3645,6 +3964,15 @@ struct FractionColorBar: View {
                 case "FVC":  return (UInt8(30 + (1-t) * 90), UInt8(80 + t * 175), UInt8(30 + (1-t) * 40))
                 case "NPV":  return (UInt8(40 + t * 215), UInt8(40 + t * 215), UInt8(20))
                 case "Soil": return (UInt8(25 + t * 115), UInt8(20 + t * 57), UInt8(5 + t * 20))
+                case "Unmix RMSE":
+                    // Pseudocolour: Green → Yellow → Red (matches spatial map)
+                    if t < 0.5 {
+                        let s = t * 2
+                        return (UInt8(s * 255), UInt8(200 + s * 55), 0)
+                    } else {
+                        let s = (t - 0.5) * 2
+                        return (255, UInt8((1 - s) * 255), 0)
+                    }
                 default:     return (UInt8(40 + t * 215), UInt8(40 + t * 215), UInt8(40 + t * 215))
                 }
             }
@@ -3654,16 +3982,15 @@ struct FractionColorBar: View {
                 context.fill(Path(CGRect(x: CGFloat(i), y: 0, width: 1, height: size.height)),
                              with: .color(Color(red: Double(r)/255, green: Double(g)/255, blue: Double(b)/255)))
             }
-            let ticks: [(Float, String)] = [(0, "0"), (0.25, ".25"), (0.5, ".5"), (0.75, ".75"), (1.0, "1")]
+            let ticks: [(Float, String)] = label == "Unmix RMSE"
+                ? [(0, "low"), (0.5, "RMSE"), (1.0, "high")]
+                : [(0, "0"), (0.25, ".25"), (0.5, ".5"), (0.75, ".75"), (1.0, "1")]
             for (val, lbl) in ticks {
                 let x = CGFloat(val) * size.width
                 let text = Text(lbl).font(.system(size: 7).monospacedDigit()).foregroundStyle(.white)
                 let r = context.resolve(text)
                 context.draw(r, at: CGPoint(x: x, y: size.height / 2))
             }
-            let lbl = Text(label).font(.system(size: 7).bold()).foregroundStyle(.white)
-            let lr = context.resolve(lbl)
-            context.draw(lr, at: CGPoint(x: size.width / 2, y: size.height / 2))
         }
         .frame(height: 12)
         .clipShape(RoundedRectangle(cornerRadius: 3))
@@ -3690,13 +4017,47 @@ struct BandColorBar: View {
                 let r = context.resolve(text)
                 context.draw(r, at: CGPoint(x: x, y: size.height / 2))
             }
-            let lbl = Text(label).font(.system(size: 7).bold()).foregroundStyle(.cyan)
-            let lr = context.resolve(lbl)
-            context.draw(lr, at: CGPoint(x: size.width / 2, y: size.height / 2))
         }
         .frame(height: 12)
         .clipShape(RoundedRectangle(cornerRadius: 3))
         .opacity(0.85)
         .padding(.horizontal, 4)
+    }
+}
+
+/// Scale bar that adapts to current zoom. Shows a round-number distance.
+struct ScaleBarView: View {
+    let metersPerPoint: Double  // physical meters per screen point
+
+    var body: some View {
+        let (barPts, label) = scaleBarParams()
+        VStack(alignment: .leading, spacing: 1) {
+            Rectangle()
+                .fill(.white)
+                .frame(width: barPts, height: 2)
+                .overlay(alignment: .leading) {
+                    Rectangle().fill(.white).frame(width: 1, height: 6)
+                }
+                .overlay(alignment: .trailing) {
+                    Rectangle().fill(.white).frame(width: 1, height: 6)
+                }
+            Text(label)
+                .font(.system(size: 8).bold().monospacedDigit())
+                .foregroundStyle(.white)
+        }
+        .shadow(color: .black.opacity(0.6), radius: 1, x: 0, y: 1)
+    }
+
+    private func scaleBarParams() -> (CGFloat, String) {
+        let niceMeters: [Double] = [10, 20, 50, 100, 200, 500, 1000, 2000, 5000, 10000]
+        for m in niceMeters {
+            let pts = m / metersPerPoint
+            if pts >= 40 && pts <= 120 {
+                let label = m >= 1000 ? "\(Int(m / 1000)) km" : "\(Int(m)) m"
+                return (CGFloat(pts), label)
+            }
+        }
+        let pts = 100.0 / metersPerPoint
+        return (CGFloat(max(20, min(150, pts))), "100 m")
     }
 }

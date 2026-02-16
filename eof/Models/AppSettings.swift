@@ -27,7 +27,7 @@ class AppSettings {
         case mapRect(minLat: Double, minLon: Double, maxLat: Double, maxLon: Double)
         case location(lat: Double, lon: Double, diameter: Double)
         case digitized
-        case cropSample(crop: String, region: String)
+        case cropSample(crop: String, region: String, sowMonth: Int = 0, harvMonth: Int = 0)
     }
 
     enum ManualShape: String, CaseIterable {
@@ -37,17 +37,31 @@ class AppSettings {
 
     enum VegetationIndex: String, CaseIterable {
         case ndvi = "NDVI"
+        case savi = "SAVI"
+        case msavi = "MSAVI"
+        case evi = "EVI"
         case dvi = "DVI"
+        case gndvi = "GNDVI"
+        case ndwi = "NDWI"
         case fvc = "FVC"
 
         var label: String { rawValue }
         var description: String {
             switch self {
             case .ndvi: return "(NIR \u{2212} Red) / (NIR + Red)"
+            case .savi: return "1.5(NIR \u{2212} Red) / (NIR + Red + 0.5)"
+            case .msavi: return "(2\u{00D7}NIR + 1 \u{2212} \u{221A}((2\u{00D7}NIR+1)\u{00B2} \u{2212} 8(NIR\u{2212}Red))) / 2"
+            case .evi: return "2.5(NIR \u{2212} Red) / (NIR + 6Red \u{2212} 7.5Blue + 1)"
             case .dvi: return "NIR \u{2212} Red"
+            case .gndvi: return "(NIR \u{2212} Green) / (NIR + Green)"
+            case .ndwi: return "(Green \u{2212} NIR) / (Green + NIR)"
             case .fvc: return "Green vegetation fraction (unmixing)"
             }
         }
+
+        /// Bands required beyond Red+NIR (which are always loaded).
+        var requiresGreen: Bool { self == .gndvi || self == .ndwi }
+        var requiresBlue: Bool { self == .evi }
     }
 
     var displayMode: DisplayMode = .fcc { didSet { save() } }
@@ -149,6 +163,7 @@ class AppSettings {
     // Area of Interest
     var aoiSource: AOISource = .bundled
     var aoiGeometry: GeoJSONGeometry? = nil
+    var aoiGeneration: Int = 0  // incremented on each AOI change to trigger onChange reliably
     var aoiHistory: [AOIHistoryEntry] = []
     private let maxHistory = 10
 
@@ -174,6 +189,7 @@ class AppSettings {
     func restoreAOI(_ entry: AOIHistoryEntry) {
         aoiSource = entry.source
         aoiGeometry = entry.geometry
+        aoiGeneration += 1
     }
 
     var aoiSourceLabel: String {
@@ -193,7 +209,11 @@ class AppSettings {
             return "My location \(Int(d))m at \(String(format: "%.4f", lat)), \(String(format: "%.4f", lon))"
         case .digitized:
             return "Digitized polygon"
-        case .cropSample(let crop, let region):
+        case .cropSample(let crop, let region, let sowMonth, let harvMonth):
+            if sowMonth > 0, harvMonth > 0 {
+                let m = Calendar.current.shortMonthSymbols
+                return "\(crop), \(region) (\(m[sowMonth - 1])\u{2013}\(m[harvMonth - 1]))"
+            }
             return "\(crop), \(region)"
         }
     }
@@ -448,4 +468,36 @@ class AppSettings {
     var endDateDisplay: String {
         endDate.formatted(.dateTime.day().month(.abbreviated).year())
     }
+
+    // MARK: - Crop Map Layers
+
+    enum CropMapCoverage: String, Codable { case conus, global }
+
+    struct CropMapLayer: Identifiable, Codable, Equatable {
+        let id: String
+        var name: String
+        var enabled: Bool
+        var resolution: Int      // meters
+        var coverage: CropMapCoverage
+    }
+
+    var cropMapLayers: [CropMapLayer] {
+        get {
+            if let data = defaults.data(forKey: prefix + "cropMapLayers"),
+               let layers = try? JSONDecoder().decode([CropMapLayer].self, from: data) {
+                return layers
+            }
+            return Self.defaultCropMapLayers
+        }
+        set {
+            if let data = try? JSONEncoder().encode(newValue) {
+                defaults.set(data, forKey: prefix + "cropMapLayers")
+            }
+        }
+    }
+
+    static let defaultCropMapLayers: [CropMapLayer] = [
+        CropMapLayer(id: "worldcover", name: "ESA WorldCover", enabled: true, resolution: 10, coverage: .global),
+        CropMapLayer(id: "cdl", name: "USDA CDL", enabled: true, resolution: 30, coverage: .conus),
+    ]
 }

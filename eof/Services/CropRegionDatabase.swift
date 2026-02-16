@@ -23,6 +23,19 @@ enum CropMapSource: String, CaseIterable, Identifiable {
 
     var id: String { rawValue }
 
+    var shortName: String {
+        switch self {
+        case .usaCDL: return "US"
+        case .euCropMap: return "EU"
+        case .southAfrica: return "ZA"
+        case .india: return "IN"
+        case .china: return "CN"
+        case .brazil: return "BR"
+        case .australia: return "AU"
+        case .global: return "Global"
+        }
+    }
+
     var samples: [CropFieldSample] {
         switch self {
         case .usaCDL: return Self.usa
@@ -168,17 +181,21 @@ enum CropMapSource: String, CaseIterable, Identifiable {
     }
 
     /// Generate a field polygon (rectangular, slightly rotated) for a sample.
+    /// Uses deterministic pseudo-random based on coordinates to avoid re-render jitter.
     func fieldPolygon(for sample: CropFieldSample) -> [(lat: Double, lon: Double)] {
+        // Deterministic seed from coordinates
+        let seed = abs(sample.lat * 1000 + sample.lon * 7919)
+        let aspect = 1.2 + (seed.truncatingRemainder(dividingBy: 8)) / 10.0 // 1.2–2.0
+        let rotDeg = (seed.truncatingRemainder(dividingBy: 60)) - 30 // -30..+30
+        let rotation = rotDeg * .pi / 180
+
         let w = typicalFieldWidth
-        let aspect = Double.random(in: 1.2...2.0) // fields are usually longer than wide
         let halfW = w / 2.0
         let halfH = (w * aspect) / 2.0
-        let rotation = Double.random(in: -30...30) * .pi / 180 // slight rotation
 
         let metersPerDegLat = 111_320.0
         let metersPerDegLon = 111_320.0 * cos(sample.lat * .pi / 180.0)
 
-        // Corner offsets in meters, then rotate
         let corners: [(dx: Double, dy: Double)] = [
             (-halfW, -halfH), (halfW, -halfH), (halfW, halfH), (-halfW, halfH)
         ]

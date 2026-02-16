@@ -14,6 +14,7 @@ class NDVIProcessor {
     var sourceProgresses: [SourceProgress] = []
     var isCancelled = false
     var isPaused = false
+    private var fetchGeneration: Int = 0
     var compareSourcesMode = false
     var comparisonPairs: [SourceComparisonView.ComparisonPair] = []
     var cachedFrames: [NDVIFrame] = []
@@ -35,6 +36,9 @@ class NDVIProcessor {
     /// Run the full pipeline.
     @MainActor
     func fetch(geometry: GeoJSONGeometry, startDate: String, endDate: String) async {
+        guard !Task.isCancelled else { return }
+        fetchGeneration += 1
+        let myGeneration = fetchGeneration
         status = .searching
         progress = 0
         progressMessage = "Searching STAC catalog..."
@@ -362,7 +366,10 @@ class NDVIProcessor {
                             }
                             processedCount += 1
                             progress = Double(processedCount) / Double(totalItems)
-                            progressMessage = "Reading imagery \(processedCount)/\(totalItems)..."
+                            let dlMB = perSceneMB * Double(processedCount)
+                            let dlStr = dlMB < 1 ? "<1" : String(Int(dlMB))
+                            let estTotal = estimatedDownloadMB < 1 ? "<1" : String(Int(estimatedDownloadMB))
+                            progressMessage = "Reading imagery \(processedCount)/\(totalItems) (~\(dlStr)/\(estTotal) MB)"
                             if slot < sourceProgresses.count {
                                 sourceProgresses[slot].completedItems += 1
                             }
@@ -422,11 +429,11 @@ class NDVIProcessor {
 
                 // Main work queue — dynamic source selection per scene
                 while keyIndex < orderedKeys.count {
-                    if self.isCancelled { group.cancelAll(); break }
-                    while self.isPaused && !self.isCancelled {
+                    if self.isCancelled || Task.isCancelled { group.cancelAll(); break }
+                    while self.isPaused && !self.isCancelled && !Task.isCancelled {
                         try? await Task.sleep(for: .milliseconds(200))
                     }
-                    if self.isCancelled { group.cancelAll(); break }
+                    if self.isCancelled || Task.isCancelled { group.cancelAll(); break }
 
                     while running >= currentMaxConc {
                         if let result = await group.next() { handleResult(result) }
@@ -513,7 +520,7 @@ class NDVIProcessor {
                     var racedKeys = Set<String>()
 
                     while running > 0 {
-                        if self.isCancelled { group.cancelAll(); break }
+                        if self.isCancelled || Task.isCancelled { group.cancelAll(); break }
 
                         // Launch races while slots are free
                         while running < currentMaxConc {
@@ -598,11 +605,11 @@ class NDVIProcessor {
 
                 // Retries — pick from alternate sources, excluding the one that failed
                 while !retryQueue.isEmpty {
-                    if self.isCancelled { group.cancelAll(); break }
-                    while self.isPaused && !self.isCancelled {
+                    if self.isCancelled || Task.isCancelled { group.cancelAll(); break }
+                    while self.isPaused && !self.isCancelled && !Task.isCancelled {
                         try? await Task.sleep(for: .milliseconds(200))
                     }
-                    if self.isCancelled { group.cancelAll(); break }
+                    if self.isCancelled || Task.isCancelled { group.cancelAll(); break }
 
                     while running >= currentMaxConc {
                         if let result = await group.next() { handleResult(result) }
@@ -685,6 +692,12 @@ class NDVIProcessor {
             // Mark all streams as done
             for sp in sourceProgresses {
                 sp.status = isCancelled ? .failed : .done
+            }
+
+            // Stale fetch guard — another fetch superseded us
+            guard myGeneration == fetchGeneration else {
+                log.warn("Fetch gen \(myGeneration) superseded by gen \(fetchGeneration) — discarding results")
+                return
             }
 
             // Sort by date, drop frames with no valid pixels
@@ -1321,10 +1334,19 @@ class NDVIProcessor {
                     // Compute selected vegetation index
                     let val: Float
                     switch viMode {
-                    case .ndvi, .fvc:
+                    case .ndvi, .fvc, .gndvi, .ndwi, .evi:
+                        // gndvi/ndwi/evi fall back to NDVI during initial fetch (green/blue recomputed later)
                         let sum = nirR + redR
                         guard sum > 0 else { zeroSumCount += 1; continue }
                         val = (nirR - redR) / sum
+                    case .savi:
+                        let sum = nirR + redR + 0.5
+                        guard sum != 0 else { zeroSumCount += 1; continue }
+                        val = 1.5 * (nirR - redR) / sum
+                    case .msavi:
+                        let disc = (2 * nirR + 1) * (2 * nirR + 1) - 8 * (nirR - redR)
+                        guard disc >= 0 else { continue }
+                        val = (2 * nirR + 1 - sqrt(disc)) / 2
                     case .dvi:
                         val = nirR - redR
                     }
@@ -1420,10 +1442,18 @@ class NDVIProcessor {
                                 let nirR2 = max(Float(0), nirRefl2)
                                 let val2: Float
                                 switch viMode {
-                                case .ndvi, .fvc:
+                                case .ndvi, .fvc, .gndvi, .ndwi, .evi:
                                     let sum2 = nirR2 + redR2
                                     guard sum2 > 0 else { continue }
                                     val2 = (nirR2 - redR2) / sum2
+                                case .savi:
+                                    let sum2 = nirR2 + redR2 + 0.5
+                                    guard sum2 != 0 else { continue }
+                                    val2 = 1.5 * (nirR2 - redR2) / sum2
+                                case .msavi:
+                                    let disc2 = (2 * nirR2 + 1) * (2 * nirR2 + 1) - 8 * (nirR2 - redR2)
+                                    guard disc2 >= 0 else { continue }
+                                    val2 = (2 * nirR2 + 1 - sqrt(disc2)) / 2
                                 case .dvi:
                                     val2 = nirR2 - redR2
                                 }
@@ -1701,10 +1731,18 @@ class NDVIProcessor {
 
                 let val: Float
                 switch viMode {
-                case .ndvi, .fvc:
+                case .ndvi, .fvc, .gndvi, .ndwi, .evi:
                     let sum = nirRefl + redRefl
                     guard sum > 0 else { continue }
                     val = (nirRefl - redRefl) / sum
+                case .savi:
+                    let sum = nirRefl + redRefl + 0.5
+                    guard sum != 0 else { continue }
+                    val = 1.5 * (nirRefl - redRefl) / sum
+                case .msavi:
+                    let disc = (2 * nirRefl + 1) * (2 * nirRefl + 1) - 8 * (nirRefl - redRefl)
+                    guard disc >= 0 else { continue }
+                    val = (2 * nirRefl + 1 - sqrt(disc)) / 2
                 case .dvi:
                     val = nirRefl - redRefl
                 }
@@ -1759,8 +1797,10 @@ class NDVIProcessor {
     func loadMissingBands(for mode: AppSettings.DisplayMode) async {
         let cogReader = COGReader()
         var updated = false
+        let count = frames.count
 
-        for i in 0..<frames.count {
+        for i in 0..<count {
+            guard i < frames.count else { break }
             let frame = frames[i]
             guard let bounds = frame.pixelBounds else { continue }
 
@@ -1768,6 +1808,7 @@ class NDVIProcessor {
             if (mode == .fcc || mode == .rcc || mode == .bandGreen) && frame.greenBand == nil,
                let url = frame.greenURL {
                 if let data = try? await cogReader.readRegion(url: url, pixelBounds: bounds) {
+                    guard i < frames.count else { break }
                     frames[i].greenBand = data
                     updated = true
                 }
@@ -1777,6 +1818,7 @@ class NDVIProcessor {
             if (mode == .rcc || mode == .bandBlue) && frame.blueBand == nil,
                let url = frame.blueURL {
                 if let data = try? await cogReader.readRegion(url: url, pixelBounds: bounds) {
+                    guard i < frames.count else { break }
                     frames[i].blueBand = data
                     updated = true
                 }
@@ -1904,8 +1946,43 @@ class NDVIProcessor {
                         let sum = nirR + redR
                         guard sum > 0 else { continue }
                         val = (nirR - redR) / sum
+                    case .savi:
+                        let sum = nirR + redR + 0.5
+                        guard sum != 0 else { continue }
+                        val = 1.5 * (nirR - redR) / sum
+                    case .msavi:
+                        let disc = (2 * nirR + 1) * (2 * nirR + 1) - 8 * (nirR - redR)
+                        guard disc >= 0 else { continue }
+                        val = (2 * nirR + 1 - sqrt(disc)) / 2
+                    case .evi:
+                        if let bb = frame.blueBand, row < bb.count, col < bb[row].count {
+                            let rawBlue = bb[row][col]
+                            guard rawBlue != 0 && rawBlue != 65535 else { continue }
+                            let blueR = max(Float(0), (Float(rawBlue) + frame.dnOffset) / quantificationValue)
+                            let denom = nirR + 6 * redR - 7.5 * blueR + 1
+                            guard denom != 0 else { continue }
+                            val = 2.5 * (nirR - redR) / denom
+                        } else { continue }
                     case .dvi:
                         val = nirR - redR
+                    case .gndvi:
+                        if let gb = frame.greenBand, row < gb.count, col < gb[row].count {
+                            let rawGreen = gb[row][col]
+                            guard rawGreen != 0 && rawGreen != 65535 else { continue }
+                            let greenR = max(Float(0), (Float(rawGreen) + frame.dnOffset) / quantificationValue)
+                            let sum = nirR + greenR
+                            guard sum > 0 else { continue }
+                            val = (nirR - greenR) / sum
+                        } else { continue }
+                    case .ndwi:
+                        if let gb = frame.greenBand, row < gb.count, col < gb[row].count {
+                            let rawGreen = gb[row][col]
+                            guard rawGreen != 0 && rawGreen != 65535 else { continue }
+                            let greenR = max(Float(0), (Float(rawGreen) + frame.dnOffset) / quantificationValue)
+                            let sum = greenR + nirR
+                            guard sum > 0 else { continue }
+                            val = (greenR - nirR) / sum
+                        } else { continue }
                     }
                     ndvi[row][col] = val
                     validValues.append(val)

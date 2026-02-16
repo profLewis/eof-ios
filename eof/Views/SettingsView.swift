@@ -35,6 +35,39 @@ struct SettingsView: View {
                     }
                 }
 
+                Section("Crop Map Layers") {
+                    ForEach(Array(settings.cropMapLayers.enumerated()), id: \.element.id) { idx, layer in
+                        HStack {
+                            Image(systemName: layer.enabled ? "checkmark.circle.fill" : "circle")
+                                .foregroundStyle(layer.enabled ? .green : .secondary)
+                                .onTapGesture {
+                                    var layers = settings.cropMapLayers
+                                    layers[idx].enabled.toggle()
+                                    settings.cropMapLayers = layers
+                                }
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text(layer.name).font(.subheadline)
+                                HStack(spacing: 4) {
+                                    Text("\(layer.resolution)m").font(.caption2).foregroundStyle(.secondary)
+                                    Text(layer.coverage == .conus ? "CONUS" : "Global")
+                                        .font(.caption2)
+                                        .padding(.horizontal, 4)
+                                        .background(layer.coverage == .global ? .blue.opacity(0.2) : .orange.opacity(0.2), in: Capsule())
+                                }
+                            }
+                            Spacer()
+                            Image(systemName: "line.3.horizontal").foregroundStyle(.secondary)
+                        }
+                    }
+                    .onMove { from, to in
+                        var layers = settings.cropMapLayers
+                        layers.move(fromOffsets: from, toOffset: to)
+                        settings.cropMapLayers = layers
+                    }
+                    Text("Drag to reorder. First matching layer is used.")
+                        .font(.caption2).foregroundStyle(.secondary)
+                }
+
                 Section("Visualization") {
                     Picker("Display", selection: $settings.displayMode) {
                         Text("NDVI").tag(AppSettings.DisplayMode.ndvi)

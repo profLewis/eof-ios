@@ -14,6 +14,43 @@ struct EndmemberSpectrum {
     }
 }
 
+/// Full-resolution (1nm) spectrum loaded from USGS Spectral Library CSV.
+struct FullResolutionSpectrum {
+    let name: String
+    /// Wavelength (nm) and reflectance pairs, sorted by wavelength.
+    let points: [(nm: Double, reflectance: Double)]
+
+    /// Linear interpolation at arbitrary wavelength.
+    func interpolated(at nm: Double) -> Double? {
+        guard let first = points.first, let last = points.last else { return nil }
+        if nm < first.nm || nm > last.nm { return nil }
+        // Binary search for bracketing interval
+        var lo = 0, hi = points.count - 1
+        while lo < hi - 1 {
+            let mid = (lo + hi) / 2
+            if points[mid].nm <= nm { lo = mid } else { hi = mid }
+        }
+        let p0 = points[lo], p1 = points[hi]
+        if p1.nm == p0.nm { return p0.reflectance }
+        let t = (nm - p0.nm) / (p1.nm - p0.nm)
+        return p0.reflectance + t * (p1.reflectance - p0.reflectance)
+    }
+
+    /// Subsample to given step size (nm) for efficient plotting.
+    func subsampled(step: Double = 5) -> [(nm: Double, reflectance: Double)] {
+        guard let first = points.first, let last = points.last else { return [] }
+        var result = [(nm: Double, reflectance: Double)]()
+        var nm = first.nm
+        while nm <= last.nm {
+            if let r = interpolated(at: nm) {
+                result.append((nm, r))
+            }
+            nm += step
+        }
+        return result
+    }
+}
+
 /// Library of standard endmember spectra for linear spectral unmixing.
 enum EndmemberLibrary {
 
@@ -80,4 +117,37 @@ enum EndmemberLibrary {
         ("B06", 740), ("B07", 783), ("B08", 842), ("B8A", 865),
         ("B11", 1610), ("B12", 2190),
     ]
+
+    // MARK: - Full-resolution USGS spectra (for plotting)
+    // Source: USGS Spectral Library Version 7 (splib07a), ASD FieldSpec, 1nm sampling.
+    // Kokaly et al. 2017, USGS Data Series 1035, https://doi.org/10.3133/ds1035
+    // CSV files stored in eof/Resources/Spectra/
+
+    /// Load a full-resolution spectrum from a bundled CSV file.
+    private static func loadCSV(_ resource: String) -> FullResolutionSpectrum? {
+        guard let url = Bundle.main.url(forResource: resource, withExtension: "csv") else { return nil }
+        guard let data = try? String(contentsOf: url, encoding: .utf8) else { return nil }
+        var points = [(nm: Double, reflectance: Double)]()
+        for line in data.split(separator: "\n").dropFirst() { // skip header
+            let cols = line.split(separator: ",")
+            guard cols.count >= 2,
+                  let nm = Double(cols[0]),
+                  let refl = Double(cols[1]),
+                  refl >= 0, refl <= 1 else { continue }
+            points.append((nm, refl))
+        }
+        return points.isEmpty ? nil : FullResolutionSpectrum(name: resource, points: points)
+    }
+
+    /// Full-resolution green vegetation (Aspen green leaf top, USGS splib07a).
+    static let fullGreenVegetation: FullResolutionSpectrum? = loadCSV("green_vegetation")
+
+    /// Full-resolution NPV (Golden dry grass GDS480, USGS splib07a).
+    static let fullNPV: FullResolutionSpectrum? = loadCSV("npv_dry_grass")
+
+    /// Full-resolution bare soil (Clean sand DWO-3-DEL2a, USGS splib07a).
+    static let fullBareSoil: FullResolutionSpectrum? = loadCSV("bare_soil_sand")
+
+    /// All full-resolution spectra, matching order of `defaults`.
+    static let fullResolution: [FullResolutionSpectrum?] = [fullGreenVegetation, fullNPV, fullBareSoil]
 }

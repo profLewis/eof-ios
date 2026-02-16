@@ -310,6 +310,54 @@ enum DoubleLogistic {
         return best
     }
 
+    /// Free-magnitude fraction fit: optimizes mn, mx, sos, rsp, seasonLength, rau.
+    /// mn and mx are free within [0, 1], allowing inverted curves (mn > mx) for NPV/Soil.
+    static func fitFreeFraction(
+        data: [DataPoint],
+        initial: DLParams,
+        maxIter: Int = 2000,
+        minSeasonLength: Double = 0,
+        maxSeasonLength: Double = 366,
+        slopeSymmetry: Double = 0,
+        bounds: (lo: [Double], hi: [Double])? = nil,
+        weights: [Double]? = nil
+    ) -> DLParams {
+        let fullLo = bounds?.lo ?? [-0.5, 0.05, 1.0, 0.02, max(minSeasonLength, 10), 0.02]
+        let fullHi = bounds?.hi ?? [0.8, 1.5, 365.0, 0.6, min(maxSeasonLength, 350), 0.6]
+        // x = [mn, mx, sos, rsp, seasonLength, rau]
+        let lo = [0.0, 0.0, fullLo[2], fullLo[3], fullLo[4], fullLo[5]]
+        let hi = [1.0, 1.0, fullHi[2], fullHi[3], fullHi[4], fullHi[5]]
+
+        func clamp(_ x: [Double]) -> [Double] {
+            var c = x
+            for i in 0..<6 { c[i] = max(lo[i], min(hi[i], c[i])) }
+            if slopeSymmetry > 0 {
+                let frac = slopeSymmetry / 100.0
+                let rsp = c[3]
+                c[5] = max(rsp * (1 - frac), min(rsp * (1 + frac), c[5]))
+                c[5] = max(lo[5], min(hi[5], c[5]))
+            }
+            return c
+        }
+
+        func toParams(_ x: [Double]) -> DLParams {
+            let cx = clamp(x)
+            return DLParams(mn: cx[0], mx: cx[1], sos: cx[2], rsp: cx[3], eos: cx[2] + cx[4], rau: cx[5])
+        }
+
+        let x0 = [initial.mn, initial.mx, initial.sos, initial.rsp, initial.eos - initial.sos, initial.rau]
+        let bestX = nelderMead(
+            x0: x0,
+            scales: [0.1, 0.1, 20.0, 0.02, 20.0, 0.02],
+            cost: { x in huberLoss(params: toParams(x), data: data, weights: weights) },
+            maxIter: maxIter
+        )
+
+        var best = toParams(bestX)
+        best.rmse = rmse(params: best, data: data)
+        return best
+    }
+
     /// Filter out-of-phase data from adjacent growing cycles.
     /// Strategy: identify the main peak, then trim leading/trailing points that belong
     /// to a different cycle (rising at the end or falling at the start).

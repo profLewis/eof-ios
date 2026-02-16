@@ -1,0 +1,36 @@
+Endmember Reference Spectra — USGS Spectral Library Version 7 (splib07a)
+==========================================================================
+
+Source: Kokaly, R.F., Clark, R.N., Swayze, G.A., Livo, K.E., Hoefen, T.M.,
+Pearson, N.C., Wise, R.A., Benzel, W.M., Lowers, H.A., Driscoll, R.L., and
+Klein, A.J., 2017, USGS Spectral Library Version 7: U.S. Geological Survey
+Data Series 1035, 61 p., https://doi.org/10.3133/ds1035
+
+Data downloaded from: https://www.sciencebase.gov/catalog/item/5807a2a2e4b0841e59e3a18d
+License: Public domain (U.S. Government work)
+
+Files:
+------
+green_vegetation.csv
+  USGS ID: splib07a_Aspen_Aspen-1_green-top_ASDFRa_AREF
+  Description: Green aspen leaf (top side), typical green vegetation canopy.
+  Instrument: ASD FieldSpec, 1nm sampling, 414-2446 nm (1932 channels).
+  Features: Chlorophyll absorption at 450nm and 670nm, green peak at 550nm,
+            red edge 680-750nm, NIR plateau ~0.47, SWIR water absorption.
+
+npv_dry_grass.csv
+  USGS ID: splib07a_Grass_Golden_Dry_GDS480_ASDFRa_AREF
+  Description: Golden dry grass (GDS480), non-photosynthetic vegetation.
+  Instrument: ASD FieldSpec, 1nm sampling, 350-2500 nm (2151 channels).
+  Features: No chlorophyll absorption, moderate visible reflectance,
+            cellulose/lignin absorption features at ~2100nm.
+
+bare_soil_sand.csv
+  USGS ID: splib07a_Sand_DWO-3-DEL2a_no_vis.oil_ASDFRa_AREF
+  Description: Clean beach sand (Deepwater Horizon reference), bare substrate.
+  Instrument: ASD FieldSpec, 1nm sampling, 350-2425 nm (1742 channels).
+  Features: Monotonically increasing reflectance from visible to SWIR,
+            no vegetation features, quartz absorption near 2200nm.
+
+Format: CSV with columns wavelength_nm (nanometers) and reflectance (0-1).
+Nodata values from original SPECPR files have been removed.
