@@ -69,6 +69,7 @@ struct ContentView: View {
     @State private var pixelInspectTimer: Timer?
     @State private var fetchTask: Task<Void, Never>?
     @State private var pixelFitTask: Task<Void, Never>?
+    @State private var unmixTask: Task<Void, Never>?
     // Spectral unmixing
     @State private var frameUnmixResults: [UUID: FrameUnmixResult] = [:]
     @State private var isRunningUnmix = false
@@ -488,7 +489,10 @@ struct ContentView: View {
                     .tint(.yellow)
                     Button(isRunningUnmix ? "Stop" : "Unmix") {
                         if isRunningUnmix {
+                            unmixTask?.cancel()
+                            unmixTask = nil
                             isRunningUnmix = false
+                            startPlayback()
                         } else {
                             runUnmixing()
                         }
@@ -506,6 +510,7 @@ struct ContentView: View {
                             pixelFitTask?.cancel()
                             pixelFitTask = nil
                             isRunningPixelFit = false
+                            startPlayback()
                         } else {
                             runPerPixelFit()
                         }
@@ -1546,15 +1551,17 @@ struct ContentView: View {
     private func runUnmixing() {
         isRunningUnmix = true
         unmixProgress = 0
+        stopPlayback()
         // Check if we need to download green/blue bands first
         let needsBands = processor.frames.contains { $0.greenBand == nil || $0.blueBand == nil }
         if needsBands {
             log.info("Downloading green/blue bands for unmixing...")
         }
-        Task {
+        unmixTask = Task {
             if needsBands {
                 await processor.loadMissingBands(for: .rcc)  // RCC loads green + blue
             }
+            guard !Task.isCancelled else { isRunningUnmix = false; return }
             let frames = processor.frames
             log.info("Unmixing \(frames.count) frames (\(frames.first?.greenBand != nil ? "4" : "2") bands)...")
             // Capture frame data for background processing (with AOI mask from ndvi)
@@ -1579,10 +1586,11 @@ struct ContentView: View {
                           dnOffset: f.dnOffset, width: f.width, height: f.height,
                           validMask: mask)
             }
-            let results = await Task.detached(priority: .utility) { () -> [UUID: FrameUnmixResult] in
+            let results = await Task.detached(priority: .background) { () -> [UUID: FrameUnmixResult] in
                 var results = [UUID: FrameUnmixResult]()
                 let total = Double(frameData.count)
                 for (i, fd) in frameData.enumerated() {
+                    if Task.isCancelled { break }
                     var bands = [[[UInt16]]]()
                     var bandInfo = [(band: String, nm: Double)]()
                     bands.append(fd.redBand)
@@ -1610,11 +1618,18 @@ struct ContentView: View {
                 }
                 return results
             }.value
+            guard !Task.isCancelled else {
+                isRunningUnmix = false
+                log.info("Unmixing cancelled")
+                return
+            }
             frameUnmixResults = results
             isRunningUnmix = false
+            unmixTask = nil
             log.success("Unmixing done: \(results.count) frames, fVeg/fNPV/fSoil/RMSE maps available in Live menu")
             // Auto-fit DL to all fraction time series
             fitAllFractions()
+            if !isRunningPixelFit { startPlayback() }
         }
     }
 
@@ -2990,6 +3005,7 @@ struct ContentView: View {
         pixelFitProgress = 0
         isClusterFiltered = false
         unfilteredPhenology = nil
+        stopPlayback()
         let frames = processor.frames
         let polygon = first.polygonNorm
         let fitSettings = PhenologyFitSettings(
@@ -3054,6 +3070,7 @@ struct ContentView: View {
                 lastPixelFitSettingsHash = pixelFitSettingsHash
                 let reclassified = pixelPhenology!
                 log.success("Per-pixel fit: \(reclassified.goodCount) good, \(reclassified.poorCount) poor, \(reclassified.skippedCount) skipped in \(String(format: "%.1f", result.computeTimeSeconds))s")
+                startPlayback()
             }
         }
     }
@@ -3289,6 +3306,8 @@ struct ContentView: View {
         processor.cancelFetch()
         pixelFitTask?.cancel()
         pixelFitTask = nil
+        unmixTask?.cancel()
+        unmixTask = nil
         stopPlayback()
 
         // Reset frame index

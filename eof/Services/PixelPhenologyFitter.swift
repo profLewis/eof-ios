@@ -61,75 +61,88 @@ enum PixelPhenologyFitter {
         let totalWork = workItems.count
         let progressActor = ProgressActor(total: totalWork, onProgress: onProgress)
 
-        // Fit all pixels in parallel
+        // Fit pixels with limited concurrency to avoid freezing the UI
         var results = [[PixelPhenology?]](
             repeating: [PixelPhenology?](repeating: nil, count: width),
             count: height
         )
 
-        // Use nonisolated sendable closure workaround
         let medParams = medianParams
         let fitSettings = settings
+        // Limit parallel workers to half the cores (leave headroom for UI)
+        let maxWorkers = max(2, ProcessInfo.processInfo.activeProcessorCount / 2)
 
-        let fitted: [PixelPhenology] = await withTaskGroup(of: PixelPhenology.self) { group in
-            for item in workItems {
+        // Process in chunks — each worker handles a batch of pixels serially
+        let chunkSize = max(1, (totalWork + maxWorkers - 1) / maxWorkers)
+        let chunks = stride(from: 0, to: totalWork, by: chunkSize).map { start in
+            Array(workItems[start..<min(start + chunkSize, totalWork)])
+        }
+
+        let fitted: [PixelPhenology] = await withTaskGroup(of: [PixelPhenology].self) { group in
+            for chunk in chunks {
                 group.addTask {
-                    let row = item.row, col = item.col, data = item.data
+                    var batch = [PixelPhenology]()
+                    for item in chunk {
+                        if Task.isCancelled { break }
+                        let row = item.row, col = item.col, data = item.data
 
-                    if data.count < fitSettings.minObservations {
+                        if data.count < fitSettings.minObservations {
+                            await progressActor.increment()
+                            var px = PixelPhenology(
+                                row: row, col: col,
+                                params: medParams,
+                                nValidObs: data.count,
+                                fitQuality: .skipped
+                            )
+                            px.rejectionDetail = PixelPhenology.RejectionDetail(
+                                reason: .skipped,
+                                observationCount: data.count,
+                                rmse: nil,
+                                rmseThreshold: Double(fitSettings.minObservations),
+                                clusterDistance: nil,
+                                clusterThreshold: nil,
+                                paramZScores: nil
+                            )
+                            batch.append(px)
+                            continue
+                        }
+
+                        let fitted = DoubleLogistic.pixelFit(
+                            data: data,
+                            medianParams: medParams,
+                            settings: fitSettings
+                        )
+
+                        let quality: PixelPhenology.FitQuality =
+                            fitted.rmse < fitSettings.rmseThreshold ? .good : .poor
+
                         await progressActor.increment()
                         var px = PixelPhenology(
                             row: row, col: col,
-                            params: medParams,
+                            params: fitted,
                             nValidObs: data.count,
-                            fitQuality: .skipped
+                            fitQuality: quality
                         )
-                        px.rejectionDetail = PixelPhenology.RejectionDetail(
-                            reason: .skipped,
-                            observationCount: data.count,
-                            rmse: nil,
-                            rmseThreshold: Double(fitSettings.minObservations),
-                            clusterDistance: nil,
-                            clusterThreshold: nil,
-                            paramZScores: nil
-                        )
-                        return px
+                        if quality == .poor {
+                            px.rejectionDetail = PixelPhenology.RejectionDetail(
+                                reason: .poor,
+                                observationCount: data.count,
+                                rmse: fitted.rmse,
+                                rmseThreshold: fitSettings.rmseThreshold,
+                                clusterDistance: nil,
+                                clusterThreshold: nil,
+                                paramZScores: nil
+                            )
+                        }
+                        batch.append(px)
                     }
-
-                    let fitted = DoubleLogistic.pixelFit(
-                        data: data,
-                        medianParams: medParams,
-                        settings: fitSettings
-                    )
-
-                    let quality: PixelPhenology.FitQuality =
-                        fitted.rmse < fitSettings.rmseThreshold ? .good : .poor
-
-                    await progressActor.increment()
-                    var px = PixelPhenology(
-                        row: row, col: col,
-                        params: fitted,
-                        nValidObs: data.count,
-                        fitQuality: quality
-                    )
-                    if quality == .poor {
-                        px.rejectionDetail = PixelPhenology.RejectionDetail(
-                            reason: .poor,
-                            observationCount: data.count,
-                            rmse: fitted.rmse,
-                            rmseThreshold: fitSettings.rmseThreshold,
-                            clusterDistance: nil,
-                            clusterThreshold: nil,
-                            paramZScores: nil
-                        )
-                    }
-                    return px
+                    return batch
                 }
             }
 
             var collected = [PixelPhenology]()
-            for await result in group {
-                collected.append(result)
+            for await batch in group {
+                collected.append(contentsOf: batch)
             }
             return collected
         }
