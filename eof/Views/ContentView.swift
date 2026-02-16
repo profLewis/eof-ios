@@ -3337,6 +3337,13 @@ struct ContentView: View {
     private func startFetch() {
         log.clear()
 
+        // Re-enable sources that may have been disabled by a previous probe failure
+        for i in settings.sources.indices {
+            if !settings.sources[i].isEnabled && [.planetary, .aws].contains(settings.sources[i].sourceID) {
+                settings.sources[i].isEnabled = true
+            }
+        }
+
         // Use existing AOI geometry, or pick a random crop field on first launch
         let geometry: GeoJSONGeometry
         if let existing = settings.aoiGeometry {
@@ -3365,7 +3372,12 @@ struct ContentView: View {
 
         log.success("AOI loaded: \(geometry.polygon.count) vertices")
         let c = geometry.centroid
+        let b = geometry.bbox
         log.info("Centroid: \(String(format: "%.4f", c.lon))E, \(String(format: "%.4f", c.lat))N")
+        log.info("Dates: \(settings.startDateString) → \(settings.endDateString)")
+        log.info("Bbox: \(String(format: "%.4f", b.minLon))–\(String(format: "%.4f", b.maxLon))E, \(String(format: "%.4f", b.minLat))–\(String(format: "%.4f", b.maxLat))N")
+        let srcNames = settings.enabledSources.map(\.shortName).joined(separator: ", ")
+        log.info("Sources: \(srcNames.isEmpty ? "NONE" : srcNames)")
 
         lastStartDate = settings.startDateString
         lastEndDate = settings.endDateString

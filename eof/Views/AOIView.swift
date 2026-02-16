@@ -332,26 +332,7 @@ struct AOIView: View {
                         }
                     }
 
-                    // Tap-to-select field polygons (transparent overlay for polygon tap)
-                    ForEach(cropMapFields.prefix(20)) { field in
-                        Annotation("", coordinate: CLLocationCoordinate2D(
-                            latitude: field.centroid.lat - 0.0001,
-                            longitude: field.centroid.lon
-                        )) {
-                            Color.clear
-                                .frame(width: 44, height: 44)
-                                .contentShape(Rectangle())
-                                .onTapGesture {
-                                    if highlightedFieldID == field.id {
-                                        selectExtractedField(field)
-                                    } else {
-                                        withAnimation(.easeInOut(duration: 0.15)) {
-                                            highlightedFieldID = field.id
-                                        }
-                                    }
-                                }
-                        }
-                    }
+                    // Field taps handled by mapGestureOverlay in view mode
                 }
 
                 // Current AOI polygon (green) — view or edit mode with edit vertices
@@ -547,6 +528,14 @@ struct AOIView: View {
                             drawMode = .view
                         }
                 )
+        } else if drawMode == .view && !cropMapFields.isEmpty {
+            // Allow tapping field polygons in view mode
+            Color.clear.contentShape(Rectangle())
+                .onTapGesture { location in
+                    if let coord = proxy.convert(location, from: .local) {
+                        handleFieldTap(coord)
+                    }
+                }
         } else if drawMode == .edit {
             Color.clear.contentShape(Rectangle())
                 .gesture(
@@ -593,6 +582,32 @@ struct AOIView: View {
         }
 
         drawingVertices.append(coord)
+    }
+
+    /// Handle tap on the map in view mode — check if it's inside a field polygon.
+    private func handleFieldTap(_ coord: CLLocationCoordinate2D) {
+        // Check each visible field polygon
+        for field in cropMapFields.prefix(20) {
+            let verts = field.vertices.map {
+                CLLocationCoordinate2D(latitude: $0.lat, longitude: $0.lon)
+            }
+            if pointInPolygonGeo(coord, polygon: verts) {
+                if highlightedFieldID == field.id {
+                    selectExtractedField(field)
+                } else {
+                    withAnimation(.easeInOut(duration: 0.15)) {
+                        highlightedFieldID = field.id
+                    }
+                }
+                return
+            }
+        }
+        // Tapped outside any field — deselect
+        if highlightedFieldID != nil {
+            withAnimation(.easeInOut(duration: 0.15)) {
+                highlightedFieldID = nil
+            }
+        }
     }
 
     // MARK: - Mode Overlay

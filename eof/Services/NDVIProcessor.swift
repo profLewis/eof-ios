@@ -113,17 +113,13 @@ class NDVIProcessor {
                 return results
             }
 
-            // Disable failed sources, log timing
+            // Skip failed sources for THIS fetch only (don't permanently disable)
             for probe in probeResults where !probe.ok {
                 if let idx = validatedSources.firstIndex(where: { $0.sourceID == probe.sourceID }) {
                     let name = validatedSources[idx].displayName
                     validatedSources.remove(at: idx)
-                    let msg = "\(name) unavailable — disabled for this fetch"
-                    log.warn(msg + (probe.error.map { " (\($0))" } ?? ""))
-                    if let si = settings.sources.firstIndex(where: { $0.sourceID == probe.sourceID }) {
-                        settings.sources[si].isEnabled = false
-                    }
-                    progressMessage = msg
+                    log.warn("\(name) unavailable" + (probe.error.map { " (\($0))" } ?? ""))
+                    progressMessage = "\(name) unavailable — skipping"
                 }
             }
             for probe in probeResults where probe.ok {
@@ -134,6 +130,7 @@ class NDVIProcessor {
             }
 
             guard !validatedSources.isEmpty else {
+                log.error("All \(settings.enabledSources.count) source(s) failed probe")
                 throw STACError.noItems
             }
 
