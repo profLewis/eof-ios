@@ -1887,22 +1887,41 @@ struct AOIView: View {
                 }
             }
 
-            // Filter to approximately field-sized: 0.5–500 hectares (5,000–5,000,000 m²)
+            // Filter to approximately field-sized: 0.5–500 hectares, not too thin
             let minFieldArea = 5_000.0    // 0.5 ha
             let maxFieldArea = 5_000_000.0 // 500 ha
-            let fieldSized = allFields.filter { $0.areaSqM >= minFieldArea && $0.areaSqM <= maxFieldArea }
-            // Sort by proximity to ideal field size (~20 ha), or shuffle for variety
+            let maxAspect = 5.0 // reject fields thinner than 5:1
+            let fieldSized = allFields.filter { f in
+                guard f.areaSqM >= minFieldArea && f.areaSqM <= maxFieldArea else { return false }
+                // Check aspect ratio from bbox (use metres for lat/lon correction)
+                let latSpan = abs(f.bbox.maxLat - f.bbox.minLat)
+                let lonSpan = abs(f.bbox.maxLon - f.bbox.minLon)
+                guard latSpan > 0 && lonSpan > 0 else { return false }
+                let cosLat = cos(f.centroid.lat * .pi / 180)
+                let h = latSpan * 111_320
+                let w = lonSpan * 111_320 * cosLat
+                let aspect = max(h, w) / max(min(h, w), 1)
+                return aspect <= maxAspect
+            }
+            // Sort by proximity to ideal field size (~20 ha) and compactness, or shuffle
             let idealArea = 200_000.0 // 20 ha
+            func fieldScore(_ f: ExtractedField) -> Double {
+                let sizeScore = abs(Darwin.log(max(1, f.areaSqM) / idealArea))
+                let latSpan = abs(f.bbox.maxLat - f.bbox.minLat)
+                let lonSpan = abs(f.bbox.maxLon - f.bbox.minLon)
+                let cosLat = cos(f.centroid.lat * .pi / 180)
+                let h = latSpan * 111_320
+                let w = lonSpan * 111_320 * cosLat
+                let aspect = max(h, w) / max(min(h, w), 1)
+                return sizeScore + (aspect - 1) * 0.3 // penalise elongated fields
+            }
             let sorted: [ExtractedField]
             if fieldSized.isEmpty {
                 sorted = shuffle ? allFields.shuffled() : allFields.sorted { $0.areaSqM > $1.areaSqM }
             } else if shuffle {
                 sorted = fieldSized.shuffled()
             } else {
-                sorted = fieldSized.sorted {
-                    abs(Darwin.log(max(1, $0.areaSqM) / idealArea)) <
-                    abs(Darwin.log(max(1, $1.areaSqM) / idealArea))
-                }
+                sorted = fieldSized.sorted { fieldScore($0) < fieldScore($1) }
             }
 
             let finalFields = Array(sorted.prefix(30))

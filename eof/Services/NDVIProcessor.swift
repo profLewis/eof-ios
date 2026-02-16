@@ -49,7 +49,8 @@ class NDVIProcessor {
         isPaused = false
         isCancelled = false
 
-        log.info("Starting fetch: \(startDate) to \(endDate)")
+        let c = geometry.centroid
+        log.info("Fetch: \(startDate) → \(endDate) at \(String(format: "%.3f", c.lon))E, \(String(format: "%.3f", c.lat))N")
 
         do {
             // 0. Validate enabled sources — quick probe, disable failures
@@ -151,34 +152,45 @@ class NDVIProcessor {
             }
 
             var searchResults = [SourceSearchResult]()
-            await withTaskGroup(of: SourceSearchResult?.self) { group in
+            var searchErrors = [String]()
+            await withTaskGroup(of: (SourceSearchResult?, String?).self) { group in
                 for src in enabledSources {
                     group.addTask {
-                        if src.sourceID == .gee {
-                            let projectID = KeychainService.retrieve(key: "gee.project") ?? ""
-                            guard !projectID.isEmpty else { return nil }
-                            let gee = GEEService(projectID: projectID, tokenManager: GEETokenManager())
-                            if let items = try? await gee.search(
-                                geometry: geometry, startDate: startDate, endDate: endDate
-                            ), !items.isEmpty {
-                                return SourceSearchResult(config: src, items: items)
+                        do {
+                            if src.sourceID == .gee {
+                                let projectID = KeychainService.retrieve(key: "gee.project") ?? ""
+                                guard !projectID.isEmpty else { return (nil, "\(src.shortName): no project ID") }
+                                let gee = GEEService(projectID: projectID, tokenManager: GEETokenManager())
+                                let items = try await gee.search(
+                                    geometry: geometry, startDate: startDate, endDate: endDate
+                                )
+                                if items.isEmpty { return (nil, "\(src.shortName): 0 items") }
+                                return (SourceSearchResult(config: src, items: items), nil)
                             }
-                            return nil
+                            let stac = STACService(config: src)
+                            let items = try await stac.search(
+                                geometry: geometry, startDate: startDate, endDate: endDate
+                            )
+                            if items.isEmpty { return (nil, "\(src.shortName): 0 items") }
+                            return (SourceSearchResult(config: src, items: items), nil)
+                        } catch {
+                            return (nil, "\(src.shortName): \(error.localizedDescription)")
                         }
-                        let stac = STACService(config: src)
-                        if let items = try? await stac.search(
-                            geometry: geometry, startDate: startDate, endDate: endDate
-                        ), !items.isEmpty {
-                            return SourceSearchResult(config: src, items: items)
-                        }
-                        return nil
                     }
                 }
-                for await result in group {
+                for await (result, errMsg) in group {
                     if let r = result {
                         searchResults.append(r)
                     }
+                    if let e = errMsg {
+                        searchErrors.append(e)
+                    }
                 }
+            }
+
+            // Log search errors/empty results
+            for e in searchErrors {
+                log.warn("Search: \(e)")
             }
 
             // Deduplicate by (dateString, mgrsTile), collect available sources per scene
@@ -214,7 +226,7 @@ class NDVIProcessor {
                 totalItems = orderedKeys.count
             }
             guard totalItems > 0 else {
-                log.error("No Sentinel-2 items found for date range")
+                log.error("No Sentinel-2 items found (\(startDate) to \(endDate), \(enabledSources.count) source(s))")
                 throw STACError.noItems
             }
 
