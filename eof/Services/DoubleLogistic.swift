@@ -417,14 +417,319 @@ enum DoubleLogistic {
     /// Compute weights for second-pass fitting from a first-pass DL curve.
     /// The DL curve is rescaled to [wMin, wMax] so observations near the peak of the
     /// growing season get higher weight, while off-season observations get baseline weight.
+    /// When `invert` is true (for fNPV/fSoil), off-season gets wMax instead — the opposite of fVeg.
     static func secondPassWeights(data: [DataPoint], firstPass: DLParams,
-                                  wMin: Double = 1.0, wMax: Double = 2.0) -> [Double] {
+                                  wMin: Double = 1.0, wMax: Double = 2.0,
+                                  invert: Bool = false) -> [Double] {
         let vals = data.map { firstPass.evaluate(t: $0.doy) }
         let mn = vals.min() ?? 0
         let mx = vals.max() ?? 1
         let range = mx - mn
         guard range > 1e-6 else { return [Double](repeating: 1.0, count: data.count) }
+        if invert {
+            // Invert: off-season (low DL value) gets high weight
+            return vals.map { wMin + (wMax - wMin) * (mx - $0) / range }
+        }
         return vals.map { wMin + (wMax - wMin) * ($0 - mn) / range }
+    }
+
+    /// Shape-constrained fraction fitting.
+    /// Fits a fraction time series using the specified shape constraint + optional SOS/EOS coupling to a reference (fVeg).
+    static func ensembleFitConstrained(
+        data: [DataPoint],
+        shape: AppSettings.FractionFitShape,
+        referenceSOS: Double? = nil,
+        referenceEOS: Double? = nil,
+        sosCoupling: Double = 0.0,
+        nRuns: Int = 30,
+        perturbation: Double = 0.50,
+        slopePerturbation: Double = 0.10,
+        minSeasonLength: Double = 0,
+        maxSeasonLength: Double = 366,
+        slopeSymmetry: Double = 0,
+        bounds: (lo: [Double], hi: [Double])? = nil,
+        secondPass: Bool = false,
+        invertWeights: Bool = false
+    ) -> DLParams {
+        let filtered = filterCycleContamination(data: data)
+        guard filtered.count >= 4 else {
+            var skip = DLParams(mn: 0, mx: 1, sos: 100, rsp: 0.1, eos: 250, rau: 0.1)
+            skip.rmse = .infinity
+            return skip
+        }
+        let guess = initialGuess(data: filtered)
+        let fullLo = bounds?.lo ?? [-0.5, 0.05, 1.0, 0.02, max(minSeasonLength, 10), 0.02]
+        let fullHi = bounds?.hi ?? [0.8, 1.5, 365.0, 0.6, min(maxSeasonLength, 350), 0.6]
+        let vals = filtered.map(\.ndvi).sorted()
+        let mnData = vals.first ?? 0
+        let mxData = vals.last ?? 1
+        let firstDoy = filtered.map(\.doy).min() ?? 1
+        let lastDoy = filtered.map(\.doy).max() ?? 365
+
+        // Apply SOS coupling: tighten SOS bounds around reference
+        func coupledBounds() -> (lo: [Double], hi: [Double]) {
+            var lo = fullLo, hi = fullHi
+            if sosCoupling > 0, let refSOS = referenceSOS {
+                let origRange = (fullHi[2] - fullLo[2]) / 2
+                let halfWidth = max(5, origRange * (1 - sosCoupling))
+                lo[2] = max(fullLo[2], refSOS - halfWidth)
+                hi[2] = min(fullHi[2], refSOS + halfWidth)
+            }
+            return (lo, hi)
+        }
+
+        // Apply EOS coupling (for step-up shape)
+        func coupledEOSBounds() -> (lo: [Double], hi: [Double]) {
+            var lo = fullLo, hi = fullHi
+            if sosCoupling > 0, let refEOS = referenceEOS {
+                let origRange = (fullHi[4] - fullLo[4]) / 2
+                let halfWidth = max(5, origRange * (1 - sosCoupling))
+                // EOS bounds are in "season length" space (index 4), convert
+                // We want eos near refEOS, so season_length = eos - sos
+                // Can't directly bound eos in fitFreeFraction since it optimizes season_length
+                // Instead, just tighten SOS so the eos = sos + length lands near refEOS
+                lo[2] = max(fullLo[2], refEOS - fullHi[4])
+                hi[2] = min(fullHi[2], refEOS - fullLo[4])
+                _ = halfWidth  // coupling applied through SOS constraint
+            }
+            return (lo, hi)
+        }
+
+        func fitOneShape(_ shapeType: AppSettings.FractionFitShape) -> DLParams {
+            switch shapeType {
+            case .doubleLogistic:
+                // Standard DL: mn < mx (typical vegetation curve ∧)
+                let b = coupledBounds()
+                let initial = DLParams(mn: max(0, mnData), mx: min(1, mxData),
+                                       sos: guess.sos, rsp: guess.rsp, eos: guess.eos, rau: guess.rau)
+                var best = fitFreeFraction(data: filtered, initial: initial,
+                                           minSeasonLength: minSeasonLength, maxSeasonLength: maxSeasonLength,
+                                           slopeSymmetry: slopeSymmetry, bounds: (b.lo, b.hi))
+                // Run ensemble
+                for _ in 1..<nRuns {
+                    var p2 = initial
+                    p2.sos += guess.sos * Double.random(in: -perturbation...perturbation)
+                    p2.rsp += guess.rsp * Double.random(in: -slopePerturbation...slopePerturbation)
+                    p2.eos += guess.eos * Double.random(in: -perturbation...perturbation)
+                    p2.rau += guess.rau * Double.random(in: -slopePerturbation...slopePerturbation)
+                    p2.sos = max(b.lo[2], min(b.hi[2], p2.sos))
+                    p2.rsp = max(b.lo[3], min(b.hi[3], p2.rsp))
+                    p2.rau = max(fullLo[5], min(fullHi[5], p2.rau))
+                    let c = fitFreeFraction(data: filtered, initial: p2,
+                                            minSeasonLength: minSeasonLength, maxSeasonLength: maxSeasonLength,
+                                            slopeSymmetry: slopeSymmetry, bounds: (b.lo, b.hi))
+                    if c.rmse < best.rmse { best = c }
+                }
+                if secondPass {
+                    let w = secondPassWeights(data: filtered, firstPass: best, invert: invertWeights)
+                    best = fitFreeFraction(data: filtered, initial: best,
+                                           minSeasonLength: minSeasonLength, maxSeasonLength: maxSeasonLength,
+                                           slopeSymmetry: slopeSymmetry, bounds: (b.lo, b.hi), weights: w)
+                }
+                return best
+
+            case .invertedDL:
+                // Inverted DL: mn > mx (∨ shape — high in winter, low in summer)
+                let b = coupledBounds()
+                let initial = DLParams(mn: min(1, mxData), mx: max(0, mnData),
+                                       sos: guess.sos, rsp: guess.rsp, eos: guess.eos, rau: guess.rau)
+                var best = fitFreeFraction(data: filtered, initial: initial,
+                                           minSeasonLength: minSeasonLength, maxSeasonLength: maxSeasonLength,
+                                           slopeSymmetry: slopeSymmetry, bounds: (b.lo, b.hi))
+                for _ in 1..<nRuns {
+                    var p2 = initial
+                    p2.sos += guess.sos * Double.random(in: -perturbation...perturbation)
+                    p2.rsp += guess.rsp * Double.random(in: -slopePerturbation...slopePerturbation)
+                    p2.eos += guess.eos * Double.random(in: -perturbation...perturbation)
+                    p2.rau += guess.rau * Double.random(in: -slopePerturbation...slopePerturbation)
+                    p2.sos = max(b.lo[2], min(b.hi[2], p2.sos))
+                    p2.rsp = max(b.lo[3], min(b.hi[3], p2.rsp))
+                    p2.rau = max(fullLo[5], min(fullHi[5], p2.rau))
+                    let c = fitFreeFraction(data: filtered, initial: p2,
+                                            minSeasonLength: minSeasonLength, maxSeasonLength: maxSeasonLength,
+                                            slopeSymmetry: slopeSymmetry, bounds: (b.lo, b.hi))
+                    if c.rmse < best.rmse { best = c }
+                }
+                if secondPass {
+                    let w = secondPassWeights(data: filtered, firstPass: best, invert: invertWeights)
+                    best = fitFreeFraction(data: filtered, initial: best,
+                                           minSeasonLength: minSeasonLength, maxSeasonLength: maxSeasonLength,
+                                           slopeSymmetry: slopeSymmetry, bounds: (b.lo, b.hi), weights: w)
+                }
+                return best
+
+            case .stepUp:
+                // Step up (↑): single sigmoid rise. Fix eos far in future so autumn term ≈ 0.
+                let b = coupledEOSBounds()
+                let farEos = lastDoy + 200
+                let initial = DLParams(mn: max(0, mnData), mx: min(1, mxData),
+                                       sos: guess.eos, rsp: guess.rau, eos: farEos, rau: 0.01)
+                // For step-up, we want the inflection near EOS of vegetation
+                // so use referenceEOS if available
+                var best = fitStepUp(data: filtered, initial: initial,
+                                     bounds: (b.lo, b.hi), referenceEOS: referenceEOS, sosCoupling: sosCoupling)
+                for _ in 1..<nRuns {
+                    var p2 = initial
+                    p2.mn = max(0, min(1, p2.mn + Double.random(in: -0.1...0.1)))
+                    p2.mx = max(0, min(1, p2.mx + Double.random(in: -0.1...0.1)))
+                    p2.sos += 30 * Double.random(in: -1...1)
+                    p2.rsp += 0.05 * Double.random(in: -1...1)
+                    p2.rsp = max(0.01, min(0.6, p2.rsp))
+                    let c = fitStepUp(data: filtered, initial: p2,
+                                      bounds: (b.lo, b.hi), referenceEOS: referenceEOS, sosCoupling: sosCoupling)
+                    if c.rmse < best.rmse { best = c }
+                }
+                if secondPass {
+                    let w = secondPassWeights(data: filtered, firstPass: best, invert: invertWeights)
+                    best = fitStepUp(data: filtered, initial: best,
+                                     bounds: (b.lo, b.hi), referenceEOS: referenceEOS, sosCoupling: sosCoupling, weights: w)
+                }
+                return best
+
+            case .stepDown:
+                // Step down (↓): single sigmoid fall. Fix sos far in past so spring term ≈ 1.
+                let b = coupledBounds()
+                let farSos = firstDoy - 200
+                let initial = DLParams(mn: max(0, mnData), mx: min(1, mxData),
+                                       sos: farSos, rsp: 0.01, eos: guess.sos, rau: guess.rsp)
+                var best = fitStepDown(data: filtered, initial: initial,
+                                       bounds: (b.lo, b.hi), referenceSOS: referenceSOS, sosCoupling: sosCoupling)
+                for _ in 1..<nRuns {
+                    var p2 = initial
+                    p2.mn = max(0, min(1, p2.mn + Double.random(in: -0.1...0.1)))
+                    p2.mx = max(0, min(1, p2.mx + Double.random(in: -0.1...0.1)))
+                    p2.eos += 30 * Double.random(in: -1...1)
+                    p2.rau += 0.05 * Double.random(in: -1...1)
+                    p2.rau = max(0.01, min(0.6, p2.rau))
+                    let c = fitStepDown(data: filtered, initial: p2,
+                                        bounds: (b.lo, b.hi), referenceSOS: referenceSOS, sosCoupling: sosCoupling)
+                    if c.rmse < best.rmse { best = c }
+                }
+                if secondPass {
+                    let w = secondPassWeights(data: filtered, firstPass: best, invert: invertWeights)
+                    best = fitStepDown(data: filtered, initial: best,
+                                       bounds: (b.lo, b.hi), referenceSOS: referenceSOS, sosCoupling: sosCoupling, weights: w)
+                }
+                return best
+
+            case .auto:
+                // Auto: try all shapes, pick best RMSE
+                let shapes: [AppSettings.FractionFitShape] = [.doubleLogistic, .invertedDL, .stepUp, .stepDown]
+                var bestResult = DLParams(mn: 0, mx: 1, sos: 100, rsp: 0.1, eos: 250, rau: 0.1)
+                bestResult.rmse = .infinity
+                for s in shapes {
+                    let r = fitOneShape(s)
+                    if r.rmse < bestResult.rmse { bestResult = r }
+                }
+                return bestResult
+            }
+        }
+
+        return fitOneShape(shape)
+    }
+
+    /// Step-up fit: optimize mn, mx, inflection (sos param), and rsp. EOS fixed far future.
+    private static func fitStepUp(
+        data: [DataPoint],
+        initial: DLParams,
+        maxIter: Int = 2000,
+        bounds: (lo: [Double], hi: [Double])? = nil,
+        referenceEOS: Double? = nil,
+        sosCoupling: Double = 0.0,
+        weights: [Double]? = nil
+    ) -> DLParams {
+        // x = [mn, mx, inflection, rate]
+        // inflection is the DOY where the step occurs (stored as sos in DLParams)
+        // eos is fixed far in future
+        let farEos = (data.map(\.doy).max() ?? 365) + 200
+        let fullLo = bounds?.lo ?? [-0.5, 0.05, 1.0, 0.02, 10, 0.02]
+        let fullHi = bounds?.hi ?? [0.8, 1.5, 365.0, 0.6, 350, 0.6]
+
+        // Coupling: if we have referenceEOS, constrain inflection near it
+        var inflLo = fullLo[2]
+        var inflHi = fullHi[2]
+        if sosCoupling > 0, let refEOS = referenceEOS {
+            let halfWidth = max(5, (fullHi[2] - fullLo[2]) / 2 * (1 - sosCoupling))
+            inflLo = max(fullLo[2], refEOS - halfWidth)
+            inflHi = min(fullHi[2], refEOS + halfWidth)
+        }
+
+        func clamp(_ x: [Double]) -> [Double] {
+            var c = x
+            c[0] = max(0, min(1, c[0]))  // mn
+            c[1] = max(0, min(1, c[1]))  // mx
+            c[2] = max(inflLo, min(inflHi, c[2]))  // inflection
+            c[3] = max(fullLo[3], min(fullHi[3], c[3]))  // rate
+            return c
+        }
+
+        func toParams(_ x: [Double]) -> DLParams {
+            let cx = clamp(x)
+            return DLParams(mn: cx[0], mx: cx[1], sos: cx[2], rsp: cx[3], eos: farEos, rau: 0.01)
+        }
+
+        let x0 = [initial.mn, initial.mx, initial.sos, initial.rsp]
+        let bestX = nelderMead(
+            x0: x0,
+            scales: [0.05, 0.05, 20.0, 0.02],
+            cost: { x in huberLoss(params: toParams(x), data: data, weights: weights) },
+            maxIter: maxIter
+        )
+        var best = toParams(bestX)
+        best.rmse = rmse(params: best, data: data)
+        return best
+    }
+
+    /// Step-down fit: optimize mn, mx, inflection (eos param), and rau. SOS fixed far past.
+    private static func fitStepDown(
+        data: [DataPoint],
+        initial: DLParams,
+        maxIter: Int = 2000,
+        bounds: (lo: [Double], hi: [Double])? = nil,
+        referenceSOS: Double? = nil,
+        sosCoupling: Double = 0.0,
+        weights: [Double]? = nil
+    ) -> DLParams {
+        // x = [mn, mx, inflection, rate]
+        // inflection is where the step down occurs (stored as eos in DLParams)
+        // sos is fixed far in past
+        let farSos = (data.map(\.doy).min() ?? 1) - 200
+        let fullLo = bounds?.lo ?? [-0.5, 0.05, 1.0, 0.02, 10, 0.02]
+        let fullHi = bounds?.hi ?? [0.8, 1.5, 365.0, 0.6, 350, 0.6]
+
+        // Coupling: constrain inflection near referenceSOS
+        var inflLo = fullLo[2]
+        var inflHi = fullHi[2]
+        if sosCoupling > 0, let refSOS = referenceSOS {
+            let halfWidth = max(5, (fullHi[2] - fullLo[2]) / 2 * (1 - sosCoupling))
+            inflLo = max(fullLo[2], refSOS - halfWidth)
+            inflHi = min(fullHi[2], refSOS + halfWidth)
+        }
+
+        func clamp(_ x: [Double]) -> [Double] {
+            var c = x
+            c[0] = max(0, min(1, c[0]))  // mn
+            c[1] = max(0, min(1, c[1]))  // mx
+            c[2] = max(inflLo, min(inflHi, c[2]))  // inflection (eos)
+            c[3] = max(fullLo[5], min(fullHi[5], c[3]))  // rate (rau)
+            return c
+        }
+
+        func toParams(_ x: [Double]) -> DLParams {
+            let cx = clamp(x)
+            return DLParams(mn: cx[0], mx: cx[1], sos: farSos, rsp: 0.01, eos: cx[2], rau: cx[3])
+        }
+
+        let x0 = [initial.mn, initial.mx, initial.eos, initial.rau]
+        let bestX = nelderMead(
+            x0: x0,
+            scales: [0.05, 0.05, 20.0, 0.02],
+            cost: { x in huberLoss(params: toParams(x), data: data, weights: weights) },
+            maxIter: maxIter
+        )
+        var best = toParams(bestX)
+        best.rmse = rmse(params: best, data: data)
+        return best
     }
 
     /// Ensemble fit: run from many perturbed starting points, return all viable solutions.
@@ -440,7 +745,8 @@ enum DoubleLogistic {
         slopeSymmetry: Double = 0,
         bounds: (lo: [Double], hi: [Double])? = nil,
         secondPass: Bool = false,
-        fractionMode: Bool = false
+        fractionMode: Bool = false,
+        invertWeights: Bool = false
     ) -> (best: DLParams, ensemble: [DLParams]) {
         let filtered = filterCycleContamination(data: data)
         let baseGuess = initialGuess(data: filtered)
@@ -491,8 +797,9 @@ enum DoubleLogistic {
         var best = allFits[0]
 
         // Second pass: refit with DL-derived weights
+        // For inverted fractions (fNPV/fSoil), weight off-season more heavily
         if secondPass {
-            let w = secondPassWeights(data: filtered, firstPass: best)
+            let w = secondPassWeights(data: filtered, firstPass: best, invert: invertWeights)
             best = fractionMode
                 ? fitFraction(data: filtered, initial: best,
                     minSeasonLength: minSeasonLength, maxSeasonLength: maxSeasonLength,
@@ -557,9 +864,11 @@ enum DoubleLogistic {
         }
 
         // Second pass: refit with DL-derived weights from first pass
+        // For fNPV/fSoil, invert weights so off-season observations get more weight
         if settings.secondPass {
             let w = secondPassWeights(data: filtered, firstPass: bestFit,
-                                      wMin: settings.secondPassWeightMin, wMax: settings.secondPassWeightMax)
+                                      wMin: settings.secondPassWeightMin, wMax: settings.secondPassWeightMax,
+                                      invert: settings.invertWeights)
             bestFit = fit(data: filtered, initial: bestFit, maxIter: settings.maxIter,
                          minSeasonLength: settings.minSeasonLength, maxSeasonLength: settings.maxSeasonLength,
                          slopeSymmetry: settings.slopeSymmetry, bounds: b, weights: w)
@@ -594,6 +903,7 @@ struct PhenologyFitSettings: Sendable {
     let secondPass: Bool
     let secondPassWeightMin: Double
     let secondPassWeightMax: Double
+    let invertWeights: Bool  // true for fNPV/fSoil: weight off-season more
 
     /// Build lo/hi arrays for optimizer in reparameterized space [mn, delta, sos, rsp, seasonLength, rau]
     var boundsArrays: (lo: [Double], hi: [Double]) {

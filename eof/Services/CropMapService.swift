@@ -372,8 +372,15 @@ actor CropMapService {
             }
         }
 
+        // Compute actual pixel-aligned bbox from geotransform
+        let actualBbox = (
+            minLon: originX + Double(pixelBounds.minCol) * scaleX,
+            minLat: originY + Double(pixelBounds.maxRow) * scaleY,
+            maxLon: originX + Double(pixelBounds.maxCol) * scaleX,
+            maxLat: originY + Double(pixelBounds.minRow) * scaleY
+        )
         await log.success("WorldCover: \(width)x\(height) land cover loaded")
-        return CropMapRaster(width: width, height: height, data: uint8Data, bbox: bbox, source: .worldCover)
+        return CropMapRaster(width: width, height: height, data: uint8Data, bbox: actualBbox, source: .worldCover)
     }
 
     // MARK: - Field Extraction
@@ -386,7 +393,7 @@ actor CropMapService {
     ) -> [ExtractedField] {
         let w = raster.width, h = raster.height
         guard w > 0 && h > 0 else { return [] }
-        guard w * h <= 2_000_000 else { return [] } // cap to avoid memory issues
+        guard w * h <= 6_000_000 else { return [] } // cap to avoid memory issues
         var labels = [Int](repeating: 0, count: w * h)
         var nextLabel = 1
         let maxFieldPixels = 50_000 // cap BFS to avoid memory blow-up

@@ -74,6 +74,7 @@ struct ContentView: View {
     @State private var frameUnmixResults: [UUID: FrameUnmixResult] = [:]
     @State private var isRunningUnmix = false
     @State private var unmixProgress: Double = 0
+    @State private var lastUnmixHash: Int = 0
     // showColorBar removed — always show
     // Network & download estimation
     @State private var networkMonitor = NetworkMonitor.shared
@@ -174,10 +175,16 @@ struct ContentView: View {
                     if settings.showBasemap && basemapImage == nil {
                         loadBasemap()
                     }
-                    // Always run unmixing first (computes FVC from median)
-                    runUnmixing()
-                    // DL fit will auto-run after unmixing completes
-                    if processor.frames.count >= 4 && !settings.enableSpectralUnmixing && settings.vegetationIndex != .fvc {
+                    // Run unmixing if not already done for these frames
+                    let currentUnmixHash = unmixConditionsHash()
+                    if frameUnmixResults.isEmpty || lastUnmixHash != currentUnmixHash {
+                        runUnmixing()
+                    } else {
+                        log.success("fVeg/fNPV/fSoil already computed (\(frameUnmixResults.count) frames) — press Unmix\u{2713} to force")
+                    }
+                    // Always run DL fit immediately (uses NDVI as fallback if FVC pending)
+                    // Unmixing completion will refit to FVC when ready
+                    if processor.frames.count >= 4 {
                         runDLFit()
                     }
                 }
@@ -487,12 +494,16 @@ struct ContentView: View {
                     .font(.caption)
                     .buttonStyle(.bordered)
                     .tint(.yellow)
-                    Button(isRunningUnmix ? "Stop" : "Unmix") {
+                    Button(isRunningUnmix ? "Stop" : (frameUnmixResults.isEmpty ? "Unmix" : "Unmix \u{2713}")) {
                         if isRunningUnmix {
                             unmixTask?.cancel()
                             unmixTask = nil
                             isRunningUnmix = false
                             startPlayback()
+                        } else if !frameUnmixResults.isEmpty {
+                            log.info("Unmix: forcing re-run (\(frameUnmixResults.count) frames already done)")
+                            lastUnmixHash = 0  // force
+                            runUnmixing()
                         } else {
                             runUnmixing()
                         }
@@ -918,7 +929,10 @@ struct ContentView: View {
                         .onAppear { dragStartIndex = currentFrameIndex }
                         .onChange(of: currentFrameIndex) { dragStartIndex = currentFrameIndex }
                     }
-                    .frame(height: CGFloat(frame.height) * (UIScreen.main.bounds.width / CGFloat(frame.width)))
+                    .frame(height: min(
+                        CGFloat(frame.height) * (UIScreen.main.bounds.width / CGFloat(frame.width)),
+                        UIScreen.main.bounds.height * 0.5  // cap at 50% screen height
+                    ))
                     .overlay(alignment: .bottom) {
                         // Static colorbar (not affected by zoom/pan) — tap to toggle
                         if showColorbar && !showBadData {
@@ -1036,6 +1050,11 @@ struct ContentView: View {
 
     // MARK: - NDVI Time Series Chart
 
+    /// Whether FVC is requested but unmixing hasn't completed yet — show NDVI as fallback.
+    private var fvcPending: Bool {
+        settings.vegetationIndex == .fvc && frameUnmixResults.isEmpty
+    }
+
     private var viLabel: String {
         if let target = chartFractionTarget {
             switch target {
@@ -1045,6 +1064,8 @@ struct ContentView: View {
             default: return target.rawValue
             }
         }
+        // When FVC is requested but unmix not ready, show NDVI as fallback
+        if fvcPending { return "NDVI" }
         return settings.vegetationIndex.rawValue
     }
 
@@ -1088,7 +1109,7 @@ struct ContentView: View {
         pixelPhenology != nil && lastPixelFitSettingsHash != pixelFitSettingsHash
     }
 
-    /// Chart y-axis label and value depending on display mode.
+    /// Chart y-axis label — always shows selected VI or fraction, never raw reflectance.
     private var chartLabel: String {
         if isInspectingPixel {
             let w = settings.pixelInspectWindow
@@ -1096,13 +1117,7 @@ struct ContentView: View {
             return w > 1 ? "\(label) [\(w)\u{00D7}\(w)]" : label
         }
         if let target = chartFractionTarget { return "Median \(target.rawValue)" }
-        switch settings.displayMode {
-        case .ndvi, .fcc, .rcc, .scl: return "Median \(viLabel)"
-        case .bandRed: return "Red (B04)"
-        case .bandNIR: return "NIR (B08)"
-        case .bandGreen: return "Green (B03)"
-        case .bandBlue: return "Blue (B02)"
-        }
+        return "Median \(viLabel)"
     }
 
     /// Which fraction the chart is targeting (nil = VI or band reflectance).
@@ -1120,43 +1135,24 @@ struct ContentView: View {
     /// Whether the chart should display fVeg values (when VI is FVC and unmix results exist).
     private var chartShowsFveg: Bool { chartFractionTarget != nil }
 
-    /// Dynamic y-axis domain based on what's being charted.
+    /// Dynamic y-axis domain — always VI or fraction range (chart never shows raw reflectance).
     private var chartYDomain: ClosedRange<Double> {
-        switch settings.displayMode {
-        case .bandRed, .bandNIR, .bandGreen, .bandBlue:
-            return 0.0...0.55  // reflectance range
-        default:
-            return chartShowsFveg ? 0.0...1.05 : -0.25...1.05
-        }
+        chartShowsFveg ? 0.0...1.05 : -0.25...1.05
     }
 
     /// Dynamic y-axis tick values.
     private var chartYAxisValues: [Double] {
-        switch settings.displayMode {
-        case .bandRed, .bandNIR, .bandGreen, .bandBlue:
-            return [0, 0.1, 0.2, 0.3, 0.4, 0.5]
-        default:
-            return chartShowsFveg ? [0, 0.25, 0.5, 0.75, 1.0] : [-0.2, 0, 0.25, 0.5, 0.75, 1.0]
-        }
+        chartShowsFveg ? [0, 0.25, 0.5, 0.75, 1.0] : [-0.2, 0, 0.25, 0.5, 0.75, 1.0]
     }
 
-    /// Get the chart y-value for a frame depending on display mode.
+    /// Get the chart y-value for a frame — always uses selected VI or fraction, never raw reflectance.
     private func chartValue(for frame: NDVIFrame) -> Double {
         if let target = chartFractionTarget, let fv = medianFraction(for: frame, param: target) {
             return fv
         }
-        switch settings.displayMode {
-        case .ndvi, .fcc, .rcc, .scl:
-            return Double(frame.medianNDVI)
-        case .bandRed:
-            return medianReflectance(band: frame.redBand, frame: frame)
-        case .bandNIR:
-            return medianReflectance(band: frame.nirBand, frame: frame)
-        case .bandGreen:
-            return medianReflectance(band: frame.greenBand, frame: frame)
-        case .bandBlue:
-            return medianReflectance(band: frame.blueBand, frame: frame)
-        }
+        // Always chart the selected vegetation index regardless of display mode
+        // (band display modes only affect imagery, not the median plot)
+        return Double(frame.medianNDVI)
     }
 
     /// Per-frame max VI (from valid pixels within AOI).
@@ -1179,6 +1175,7 @@ struct ContentView: View {
         var vals = [Float]()
         for row in 0..<min(frame.height, band.count) {
             for col in 0..<min(frame.width, band[row].count) {
+                guard row < frame.ndvi.count, col < frame.ndvi[row].count else { continue }
                 if !frame.ndvi[row][col].isNaN {  // only valid pixels
                     vals.append((Float(band[row][col]) + ofs) / 10000.0)
                 }
@@ -1548,6 +1545,14 @@ struct ContentView: View {
     }
 
     /// Run spectral unmixing on all frames.
+    /// Hash of conditions that affect unmixing — frame IDs + enforceAOI setting.
+    private func unmixConditionsHash() -> Int {
+        var hasher = Hasher()
+        for f in processor.frames { hasher.combine(f.id) }
+        hasher.combine(settings.enforceAOI)
+        return hasher.finalize()
+    }
+
     private func runUnmixing() {
         isRunningUnmix = true
         unmixProgress = 0
@@ -1624,11 +1629,17 @@ struct ContentView: View {
                 return
             }
             frameUnmixResults = results
+            lastUnmixHash = unmixConditionsHash()
             isRunningUnmix = false
             unmixTask = nil
             log.success("Unmixing done: \(results.count) frames, fVeg/fNPV/fSoil/RMSE maps available in Live menu")
             // Auto-fit DL to all fraction time series
             fitAllFractions()
+            // If FVC was pending, refit the median DL curve to FVC now
+            if settings.vegetationIndex == .fvc && processor.frames.count >= 4 {
+                log.info("FVC ready — switching chart from NDVI to FVC")
+                runDLFit()
+            }
             if !isRunningPixelFit { startPlayback() }
         }
     }
@@ -1661,77 +1672,55 @@ struct ContentView: View {
         guard !fracData.isEmpty else { return }
         log.info("Fitting DL to fraction time series: \(fracData.keys.map(\.rawValue).joined(separator: ", "))")
 
+        let fsoilShape = settings.fsoilFitShape
+        let fnpvShape = settings.fnpvFitShape
+        let coupling = settings.fractionSOSCoupling
+        let secondPass = settings.enableSecondPass
+
         Task.detached(priority: .utility) {
             var fits: [PhenologyParameter: DLParams] = [:]
 
-            for (param, data) in fracData {
-                let filtered = DoubleLogistic.filterCycleContamination(data: data)
-                let guess = DoubleLogistic.initialGuess(data: filtered)
+            // Fit fVeg first so SOS/EOS are available as reference
+            let fitOrder: [PhenologyParameter] = [.fveg, .fsoil, .fnpv]
+            for param in fitOrder {
+                guard let data = fracData[param] else { continue }
 
-                // Try 1: Fixed fraction mode (mn=0, mx=1)
-                let fixedResult = DoubleLogistic.ensembleFit(
-                    data: data, nRuns: 30, perturbation: p, slopePerturbation: sp,
+                let shape: AppSettings.FractionFitShape
+                let isInverted: Bool
+                switch param {
+                case .fsoil:
+                    shape = fsoilShape
+                    isInverted = true
+                case .fnpv:
+                    shape = fnpvShape
+                    isInverted = true
+                default:
+                    shape = .doubleLogistic
+                    isInverted = false
+                }
+
+                let refSOS = fits[.fveg]?.sos
+                let refEOS = fits[.fveg]?.eos
+
+                let best = DoubleLogistic.ensembleFitConstrained(
+                    data: data, shape: shape,
+                    referenceSOS: refSOS, referenceEOS: refEOS,
+                    sosCoupling: param == .fveg ? 0 : coupling,
+                    nRuns: 30, perturbation: p, slopePerturbation: sp,
                     minSeasonLength: minSL, maxSeasonLength: maxSL,
                     slopeSymmetry: Double(settings.slopeSymmetry),
-                    bounds: dlBounds, fractionMode: true
+                    bounds: dlBounds, secondPass: secondPass,
+                    invertWeights: isInverted
                 )
-
-                // Try 2: Free magnitude (mn, mx free within [0,1])
-                let freeGuess: DLParams
-                if param == .fveg {
-                    // FVC: start from low mn, high mx
-                    let mnGuess = max(0, data.map(\.ndvi).min() ?? 0)
-                    let mxGuess = min(1, data.map(\.ndvi).max() ?? 1)
-                    freeGuess = DLParams(mn: mnGuess, mx: mxGuess, sos: guess.sos, rsp: guess.rsp, eos: guess.eos, rau: guess.rau)
-                } else {
-                    // NPV/Soil: may be inverted (starts high, drops during growing season)
-                    let vals = data.map(\.ndvi).sorted()
-                    let mnGuess = vals.first ?? 0
-                    let mxGuess = vals.last ?? 1
-                    // Try both orientations
-                    freeGuess = DLParams(mn: mnGuess, mx: mxGuess, sos: guess.sos, rsp: guess.rsp, eos: guess.eos, rau: guess.rau)
-                }
-
-                var freeBest = DoubleLogistic.fitFreeFraction(
-                    data: filtered, initial: freeGuess,
-                    minSeasonLength: minSL, maxSeasonLength: maxSL,
-                    slopeSymmetry: Double(settings.slopeSymmetry),
-                    bounds: dlBounds
-                )
-
-                // For NPV/Soil, also try inverted initial guess
-                if param == .fnpv || param == .fsoil {
-                    let invertedGuess = DLParams(mn: freeGuess.mx, mx: freeGuess.mn,
-                                                  sos: guess.sos, rsp: guess.rsp, eos: guess.eos, rau: guess.rau)
-                    let invertedFit = DoubleLogistic.fitFreeFraction(
-                        data: filtered, initial: invertedGuess,
-                        minSeasonLength: minSL, maxSeasonLength: maxSL,
-                        slopeSymmetry: Double(settings.slopeSymmetry),
-                        bounds: dlBounds
-                    )
-                    if invertedFit.rmse < freeBest.rmse {
-                        freeBest = invertedFit
-                    }
-                }
-
-                // Pick the better fit
-                let best: DLParams
-                let mode: String
-                if freeBest.rmse < fixedResult.best.rmse {
-                    best = freeBest
-                    mode = "free mn=\(String(format: "%.2f", best.mn)) mx=\(String(format: "%.2f", best.mx))"
-                } else {
-                    best = fixedResult.best
-                    mode = "fixed mn=0 mx=1"
-                }
                 fits[param] = best
 
                 await MainActor.run {
                     let rmseStr = String(format: "%.4f", best.rmse)
+                    let shapeStr = shape.rawValue
                     if best.rmse > 0.15 {
-                        log.warn("  \(param.rawValue) DL: RMSE=\(rmseStr) (\(mode)) — poor fit")
+                        log.warn("  \(param.rawValue) DL [\(shapeStr)]: RMSE=\(rmseStr) — poor fit")
                     } else {
-                        log.success("  \(param.rawValue) DL: RMSE=\(rmseStr) (\(mode))")
+                        log.success("  \(param.rawValue) DL [\(shapeStr)]: RMSE=\(rmseStr)")
                     }
                 }
             }
@@ -1934,8 +1923,10 @@ struct ContentView: View {
                     if let full = fullSpecs[ei] {
                         // Full-resolution (5nm step) from USGS library
                         for pt in full.subsampled(step: 5) {
+                            let refl = pt.reflectance * frac
+                            guard !refl.isNaN && !refl.isInfinite else { continue }
                             pts.append(SpectralPt(id: "\(seriesNames[ei])_\(Int(pt.nm))", nm: pt.nm,
-                                                  refl: pt.reflectance * frac,
+                                                  refl: refl,
                                                   series: seriesNames[ei], band: ""))
                         }
                     } else {
@@ -1945,9 +1936,11 @@ struct ContentView: View {
                         let nms = emVals.map(\.nm); let refls = emVals.map(\.reflectance)
                         var nm = nms[0]
                         while nm <= nms[nms.count - 1] {
-                            let refl = linearInterpolate(x: nm, xs: nms, ys: refls)
-                            pts.append(SpectralPt(id: "\(seriesNames[ei])_\(Int(nm))", nm: nm,
-                                                  refl: refl * frac, series: seriesNames[ei], band: ""))
+                            let refl = linearInterpolate(x: nm, xs: nms, ys: refls) * frac
+                            if !refl.isNaN && !refl.isInfinite {
+                                pts.append(SpectralPt(id: "\(seriesNames[ei])_\(Int(nm))", nm: nm,
+                                                      refl: refl, series: seriesNames[ei], band: ""))
+                            }
                             nm += 5
                         }
                     }
@@ -1966,8 +1959,10 @@ struct ContentView: View {
                             total += Double(fractionValues[ei]) * linearInterpolate(x: nm, xs: emVals.map(\.nm), ys: emVals.map(\.reflectance))
                         }
                     }
-                    pts.append(SpectralPt(id: "pred_\(Int(nm))", nm: nm, refl: total,
-                                          series: "Predicted", band: ""))
+                    if !total.isNaN && !total.isInfinite {
+                        pts.append(SpectralPt(id: "pred_\(Int(nm))", nm: nm, refl: total,
+                                              series: "Predicted", band: ""))
+                    }
                     nm += 5
                 }
             }
@@ -2275,7 +2270,7 @@ struct ContentView: View {
             return param.rawValue
         }
         if settings.displayMode == .ndvi {
-            return settings.vegetationIndex.rawValue
+            return fvcPending ? "NDVI" : settings.vegetationIndex.rawValue
         }
         return settings.displayMode.rawValue
     }
@@ -2283,7 +2278,7 @@ struct ContentView: View {
     /// Short name for the "Live" menu item — shows what the movie is displaying.
     private var liveDisplayName: String {
         if settings.displayMode == .ndvi {
-            return settings.vegetationIndex.rawValue
+            return fvcPending ? "NDVI" : settings.vegetationIndex.rawValue
         }
         return settings.displayMode.rawValue
     }
@@ -2907,6 +2902,8 @@ struct ContentView: View {
         )
         // Fraction mode: mn=0, mx=1 fixed — for all fraction targets (0→1 normalised)
         let fracMode = useFraction
+        // For fNPV/fSoil, invert second-pass weights (weight off-season more, not peak)
+        let invertWt = fracTarget == .fnpv || fracTarget == .fsoil
         let targetLabel = fracTarget?.rawValue ?? "VI"
 
         let filtered = DoubleLogistic.filterCycleContamination(data: data)
@@ -2923,7 +2920,8 @@ struct ContentView: View {
                 slopeSymmetry: Double(settings.slopeSymmetry),
                 bounds: dlBounds,
                 secondPass: settings.enableSecondPass,
-                fractionMode: fracMode)
+                fractionMode: fracMode,
+                invertWeights: invertWt)
 
             // Identify outlier dates using MAD of residuals
             let residuals = data.map { pt in
@@ -2969,7 +2967,8 @@ struct ContentView: View {
                     slopeSymmetry: Double(settings.slopeSymmetry),
                     bounds: dlBounds,
                     secondPass: settings.enableSecondPass,
-                    fractionMode: fracMode)
+                    fractionMode: fracMode,
+                    invertWeights: invertWt)
                 await MainActor.run {
                     dlBest = result.best
                     dlEnsemble = result.ensemble
@@ -3030,7 +3029,8 @@ struct ContentView: View {
             boundRauMax: settings.boundRauMax,
             secondPass: settings.enableSecondPass,
             secondPassWeightMin: settings.secondPassWeightMin,
-            secondPassWeightMax: settings.secondPassWeightMax
+            secondPassWeightMax: settings.secondPassWeightMax,
+            invertWeights: chartFractionTarget == .fnpv || chartFractionTarget == .fsoil
         )
 
         logDistributions(label: "Per-pixel DL fit", base: medianFit, p: settings.pixelPerturbation,
@@ -3291,9 +3291,10 @@ struct ContentView: View {
         }
     }
 
-    /// When AOI sheet dismisses, retry fetch if no data loaded yet.
+    /// When AOI sheet dismisses, start fetch if no data loaded yet.
+    /// If no AOI geometry exists, startFetch will generate a random crop field.
     private func onAOIDismiss() {
-        if processor.frames.isEmpty && settings.aoiGeometry != nil && processor.status == .idle {
+        if processor.frames.isEmpty && processor.status == .idle {
             startFetch()
         }
     }
@@ -3337,6 +3338,7 @@ struct ContentView: View {
         showBadData = false
         isRunningUnmix = false
         unmixProgress = 0
+        lastUnmixHash = 0
 
         // Clear pixel inspection + selection
         isInspectingPixel = false
@@ -3345,12 +3347,10 @@ struct ContentView: View {
         zoomScale = 1.0
         panOffset = .zero
 
-        // Delay restart slightly to allow cancellation to propagate
-        processor.status = .idle
-        Task { @MainActor in
-            try? await Task.sleep(for: .milliseconds(100))
-            startFetch()
-        }
+        // Restart immediately — set searching status to prevent onAOIDismiss race
+        processor.status = .searching
+        processor.progressMessage = "Restarting..."
+        startFetch()
     }
 
     private func startFetch() {

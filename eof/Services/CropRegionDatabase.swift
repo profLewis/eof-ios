@@ -185,7 +185,7 @@ enum CropMapSource: String, CaseIterable, Identifiable {
     func fieldPolygon(for sample: CropFieldSample) -> [(lat: Double, lon: Double)] {
         // Deterministic seed from coordinates
         let seed = abs(sample.lat * 1000 + sample.lon * 7919)
-        let aspect = 1.2 + (seed.truncatingRemainder(dividingBy: 8)) / 10.0 // 1.2–2.0
+        let aspect = 1.0 + (seed.truncatingRemainder(dividingBy: 5)) / 10.0 // 1.0–1.5
         let rotDeg = (seed.truncatingRemainder(dividingBy: 60)) - 30 // -30..+30
         let rotation = rotDeg * .pi / 180
 

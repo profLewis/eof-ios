@@ -35,6 +35,20 @@ class AppSettings {
         case square = "Square"
     }
 
+    enum StartScreen: String, CaseIterable, Codable {
+        case testArea = "Test Area (ZA)"
+        case randomLocation = "Random Location"
+        case lastLoaded = "Last Loaded"
+    }
+
+    enum FractionFitShape: String, CaseIterable, Codable {
+        case auto = "Auto"
+        case doubleLogistic = "\u{2227} DL"      // ∧ standard double logistic
+        case invertedDL = "\u{2228} inv"          // ∨ inverted double logistic
+        case stepUp = "\u{2191} Up"               // ↑ single logistic step up
+        case stepDown = "\u{2193} Down"            // ↓ single logistic step down
+    }
+
     enum VegetationIndex: String, CaseIterable {
         case ndvi = "NDVI"
         case savi = "SAVI"
@@ -64,6 +78,7 @@ class AppSettings {
         var requiresBlue: Bool { self == .evi }
     }
 
+    var startScreen: StartScreen = .testArea { didSet { save() } }
     var displayMode: DisplayMode = .fcc { didSet { save() } }
     var cloudMask: Bool = true { didSet { save() } }
     var cloudThreshold: Double = 100 { didSet { save() } }
@@ -123,6 +138,11 @@ class AppSettings {
         case fnpv = "NPV Fraction"
     }
     var dlFitTarget: DLFitTarget = .vi { didSet { save() } }
+
+    // Fraction fit shape constraints
+    var fsoilFitShape: FractionFitShape = .invertedDL { didSet { save() } }
+    var fnpvFitShape: FractionFitShape = .stepUp { didSet { save() } }
+    var fractionSOSCoupling: Double = 0.5 { didSet { save() } }
 
     // Pixel inspection
     var pixelInspectWindow: Int = 1 { didSet { save() } }
@@ -244,6 +264,7 @@ class AppSettings {
     // MARK: - Persistence
 
     private func save() {
+        defaults.set(startScreen.rawValue, forKey: prefix + "startScreen")
         defaults.set(displayMode.rawValue, forKey: prefix + "displayMode")
         defaults.set(cloudMask, forKey: prefix + "cloudMask")
         defaults.set(cloudThreshold, forKey: prefix + "cloudThreshold")
@@ -289,6 +310,9 @@ class AppSettings {
         defaults.set(selectedCrop, forKey: prefix + "selectedCrop")
         defaults.set(pixelInspectWindow, forKey: prefix + "pixelInspectWindow")
         defaults.set(pixelCoverageThreshold, forKey: prefix + "pixelCoverageThreshold")
+        defaults.set(fsoilFitShape.rawValue, forKey: prefix + "fsoilFitShape")
+        defaults.set(fnpvFitShape.rawValue, forKey: prefix + "fnpvFitShape")
+        defaults.set(fractionSOSCoupling, forKey: prefix + "fractionSOSCoupling")
     }
 
     private func saveSources() {
@@ -300,6 +324,10 @@ class AppSettings {
     private func load() {
         guard defaults.object(forKey: prefix + "displayMode") != nil else { return }
 
+        if let ssRaw = defaults.string(forKey: prefix + "startScreen"),
+           let ss = StartScreen(rawValue: ssRaw) {
+            startScreen = ss
+        }
         if let raw = defaults.string(forKey: prefix + "displayMode"),
            let mode = DisplayMode(rawValue: raw) {
             displayMode = mode
@@ -398,6 +426,17 @@ class AppSettings {
         if piw > 0 { pixelInspectWindow = piw }
         if defaults.object(forKey: prefix + "pixelCoverageThreshold") != nil {
             pixelCoverageThreshold = defaults.double(forKey: prefix + "pixelCoverageThreshold")
+        }
+        if let fsRaw = defaults.string(forKey: prefix + "fsoilFitShape"),
+           let fs = FractionFitShape(rawValue: fsRaw) {
+            fsoilFitShape = fs
+        }
+        if let fnRaw = defaults.string(forKey: prefix + "fnpvFitShape"),
+           let fn = FractionFitShape(rawValue: fnRaw) {
+            fnpvFitShape = fn
+        }
+        if defaults.object(forKey: prefix + "fractionSOSCoupling") != nil {
+            fractionSOSCoupling = defaults.double(forKey: prefix + "fractionSOSCoupling")
         }
         // Restore data source selections and order
         if let data = defaults.data(forKey: prefix + "sources"),

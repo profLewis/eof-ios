@@ -35,6 +35,38 @@ struct SettingsView: View {
                     }
                 }
 
+                Section("Start Screen") {
+                    HStack {
+                        Text("On launch")
+                        Spacer()
+                        Menu {
+                            ForEach(AppSettings.StartScreen.allCases, id: \.self) { s in
+                                Button {
+                                    settings.startScreen = s
+                                } label: {
+                                    if s == settings.startScreen {
+                                        Label(s.rawValue, systemImage: "checkmark")
+                                    } else {
+                                        Text(s.rawValue)
+                                    }
+                                }
+                            }
+                        } label: {
+                            HStack(spacing: 4) {
+                                Text(settings.startScreen.rawValue)
+                                    .font(.subheadline)
+                                Image(systemName: "chevron.up.chevron.down")
+                                    .font(.caption2)
+                            }
+                            .foregroundStyle(.blue)
+                        }
+                    }
+                    if settings.startScreen == .lastLoaded {
+                        Text("Session caching not yet implemented \u{2014} will use Test Area")
+                            .font(.caption2).foregroundStyle(.secondary)
+                    }
+                }
+
                 Section("Crop Map Layers") {
                     ForEach(Array(settings.cropMapLayers.enumerated()), id: \.element.id) { idx, layer in
                         HStack {
@@ -196,6 +228,72 @@ struct SettingsView: View {
                 Section("Spectral Unmixing") {
                     Toggle("Show Fraction Time Series", isOn: $settings.showFractionTimeSeries)
                     Text("Linear mixture model: refl = a\u{00D7}GV + b\u{00D7}NPV + c\u{00D7}Soil")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+
+                    HStack {
+                        Text("fSoil fit shape")
+                        Spacer()
+                        Menu {
+                            ForEach(AppSettings.FractionFitShape.allCases, id: \.self) { s in
+                                Button {
+                                    settings.fsoilFitShape = s
+                                } label: {
+                                    if s == settings.fsoilFitShape {
+                                        Label(s.rawValue, systemImage: "checkmark")
+                                    } else {
+                                        Text(s.rawValue)
+                                    }
+                                }
+                            }
+                        } label: {
+                            HStack(spacing: 4) {
+                                Text(settings.fsoilFitShape.rawValue)
+                                    .font(.subheadline)
+                                Image(systemName: "chevron.up.chevron.down")
+                                    .font(.caption2)
+                            }
+                            .foregroundStyle(.blue)
+                        }
+                    }
+                    HStack {
+                        Text("fNPV fit shape")
+                        Spacer()
+                        Menu {
+                            ForEach(AppSettings.FractionFitShape.allCases, id: \.self) { s in
+                                Button {
+                                    settings.fnpvFitShape = s
+                                } label: {
+                                    if s == settings.fnpvFitShape {
+                                        Label(s.rawValue, systemImage: "checkmark")
+                                    } else {
+                                        Text(s.rawValue)
+                                    }
+                                }
+                            }
+                        } label: {
+                            HStack(spacing: 4) {
+                                Text(settings.fnpvFitShape.rawValue)
+                                    .font(.subheadline)
+                                Image(systemName: "chevron.up.chevron.down")
+                                    .font(.caption2)
+                            }
+                            .foregroundStyle(.blue)
+                        }
+                    }
+                    VStack(alignment: .leading, spacing: 4) {
+                        HStack {
+                            Text("SOS coupling")
+                            Spacer()
+                            Text(settings.fractionSOSCoupling < 0.01 ? "Free" :
+                                 settings.fractionSOSCoupling > 0.99 ? "Locked" :
+                                 String(format: "%.1f", settings.fractionSOSCoupling))
+                                .monospacedDigit()
+                                .foregroundStyle(.secondary)
+                        }
+                        Slider(value: $settings.fractionSOSCoupling, in: 0...1, step: 0.1)
+                    }
+                    Text("Couples fSoil/fNPV timing to fVeg SOS/EOS. 0=free, 1=locked.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }

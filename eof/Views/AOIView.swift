@@ -103,7 +103,7 @@ struct AOIView: View {
     @State private var selectedCrop: String = "Any"
     @State private var selectedYear: Int = Calendar.current.component(.year, from: Date()) - 1
     @State private var lastCropSample: CropFieldSample?
-    @State private var showFieldOverlays: Bool = true
+    @State private var showFieldOverlays: Bool = false
     @State private var nearbyFieldInfo: String?
 
     // Import sheet
@@ -201,6 +201,9 @@ struct AOIView: View {
             .onAppear {
                 aoiGenerationOnEntry = settings.aoiGeneration
                 if let geo = settings.aoiGeometry {
+                    // AOI already loaded — hide crop field overlays by default
+                    showFieldOverlays = false
+                    showCropMapOverlay = false
                     loadEditVertices(from: geo)
                     let c = geo.centroid
                     let b = geo.bbox
@@ -210,13 +213,26 @@ struct AOIView: View {
                         center: CLLocationCoordinate2D(latitude: c.lat, longitude: c.lon),
                         span: MKCoordinateSpan(latitudeDelta: max(0.005, latSpan), longitudeDelta: max(0.005, lonSpan))
                     ))
-                    // Auto-download crop map using priority order
-                    if cropMapRaster == nil {
-                        downloadCropMap()
-                    }
+                    // Don't download crop map here — lastCameraRegion is not yet set
+                    // by MapKit to the actual visible extent (aspect ratio adjusted).
+                    // The auto-download in scheduleAutoCropMapDownload() will fire
+                    // after onMapCameraChange reports the real visible region.
                 } else {
-                    // No AOI yet — set initial view based on location or locale
-                    setInitialRegionFromLocationOrLocale()
+                    // No AOI yet — use start screen setting
+                    switch settings.startScreen {
+                    case .randomLocation:
+                        // Set a temporary default view, then pick a random field
+                        showFieldOverlays = true
+                        showCropMapOverlay = true
+                        setInitialRegionFromLocationOrLocale()
+                        pickRandomField()
+                    case .lastLoaded:
+                        // Not yet implemented — fall back to test area
+                        log.info("AOI: Last Loaded not yet implemented, using Test Area")
+                        setInitialRegionFromLocationOrLocale()
+                    case .testArea:
+                        setInitialRegionFromLocationOrLocale()
+                    }
                 }
             }
         }
@@ -299,8 +315,8 @@ struct AOIView: View {
                         ).opacity(cropMapOpacity))
                     }
 
-                    // Extracted field outlines (largest fields only, for tap targets)
-                    ForEach(cropMapFields.prefix(20)) { field in
+                    // Extracted field outlines (spatially diversified, for tap targets)
+                    ForEach(cropMapFields) { field in
                         let isHighlighted = highlightedFieldID == field.id
                         let coords = field.vertices.map {
                             CLLocationCoordinate2D(latitude: $0.lat, longitude: $0.lon)
@@ -333,19 +349,6 @@ struct AOIView: View {
                     }
 
                     // Field taps handled by mapGestureOverlay in view mode
-                }
-
-                // Current AOI polygon (green) — view or edit mode with edit vertices
-                if (drawMode == .view || drawMode == .edit), editVertices.count >= 3 {
-                    MapPolygon(coordinates: editVertices)
-                        .foregroundStyle(.green.opacity(0.15))
-                        .stroke(.green, lineWidth: 2)
-                } else if drawMode != .view && drawMode != .edit, let geo = settings.aoiGeometry {
-                    // Show existing AOI while drawing
-                    let coords = geo.polygon.map { CLLocationCoordinate2D(latitude: $0.lat, longitude: $0.lon) }
-                    MapPolygon(coordinates: coords)
-                        .foregroundStyle(.green.opacity(0.1))
-                        .stroke(.green.opacity(0.5), lineWidth: 1)
                 }
 
                 // Drawing preview: polygon vertices
@@ -386,6 +389,34 @@ struct AOIView: View {
                     MapPolygon(coordinates: circleVerts)
                         .foregroundStyle(.blue.opacity(0.15))
                         .stroke(.blue, lineWidth: 2)
+                }
+
+                // Current AOI polygon (green) — rendered last so it's on top of crop map overlays
+                if (drawMode == .view || drawMode == .edit), editVertices.count >= 3 {
+                    MapPolygon(coordinates: editVertices)
+                        .foregroundStyle(.green.opacity(0.15))
+                        .stroke(.green, lineWidth: 2.5)
+                    // Tap target on AOI centroid — tapping confirms this AOI and dismisses
+                    if drawMode == .view, let geo = settings.aoiGeometry {
+                        Annotation("", coordinate: CLLocationCoordinate2D(
+                            latitude: geo.centroid.lat, longitude: geo.centroid.lon
+                        )) {
+                            Text("Double-tap to use this AOI")
+                                .font(.system(size: 9).bold())
+                                .foregroundStyle(.white)
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 3)
+                                .background(.green.opacity(0.7), in: Capsule())
+                                .onTapGesture(count: 2) {
+                                    confirmCurrentAOI()
+                                }
+                        }
+                    }
+                } else if drawMode != .view && drawMode != .edit, let geo = settings.aoiGeometry {
+                    let coords = geo.polygon.map { CLLocationCoordinate2D(latitude: $0.lat, longitude: $0.lon) }
+                    MapPolygon(coordinates: coords)
+                        .foregroundStyle(.green.opacity(0.1))
+                        .stroke(.green.opacity(0.5), lineWidth: 1.5)
                 }
 
                 // Vertex handles (edit mode)
@@ -528,14 +559,6 @@ struct AOIView: View {
                             drawMode = .view
                         }
                 )
-        } else if drawMode == .view && !cropMapFields.isEmpty {
-            // Allow tapping field polygons in view mode
-            Color.clear.contentShape(Rectangle())
-                .onTapGesture { location in
-                    if let coord = proxy.convert(location, from: .local) {
-                        handleFieldTap(coord)
-                    }
-                }
         } else if drawMode == .edit {
             Color.clear.contentShape(Rectangle())
                 .gesture(
@@ -587,7 +610,7 @@ struct AOIView: View {
     /// Handle tap on the map in view mode — check if it's inside a field polygon.
     private func handleFieldTap(_ coord: CLLocationCoordinate2D) {
         // Check each visible field polygon
-        for field in cropMapFields.prefix(20) {
+        for field in cropMapFields {
             let verts = field.vertices.map {
                 CLLocationCoordinate2D(latitude: $0.lat, longitude: $0.lon)
             }
@@ -980,9 +1003,15 @@ struct AOIView: View {
 
                 Spacer()
 
-                // Shuffle visible fields from current crop map
+                // Re-search: re-download crop map for current visible area
                 if cropMapRaster != nil {
-                    Button { refreshCropMapOverlay(shuffle: true) } label: {
+                    Button {
+                        cropMapBlocks = []
+                        cropMapFields = []
+                        cropMapRaster = nil
+                        cropClassSummary = []
+                        downloadCropMapForVisibleRegion(setAOI: false)
+                    } label: {
                         Image(systemName: "arrow.trianglehead.2.clockwise").font(.caption)
                     }
                     .buttonStyle(.bordered)
@@ -1003,7 +1032,13 @@ struct AOIView: View {
                 }
                 .buttonStyle(.bordered)
 
-                Button { downloadCropMap() } label: {
+                Button {
+                    cropMapBlocks = []
+                    cropMapFields = []
+                    cropMapRaster = nil
+                    cropClassSummary = []
+                    downloadCropMap()
+                } label: {
                     if isDownloadingCropMap {
                         ProgressView().controlSize(.mini)
                     } else {
@@ -1011,7 +1046,6 @@ struct AOIView: View {
                     }
                 }
                 .buttonStyle(.bordered)
-                .disabled(isDownloadingCropMap)
             }
 
             // Crop season info + source attribution
@@ -1078,6 +1112,10 @@ struct AOIView: View {
                     }
                 }
                 Button {
+                    cropMapBlocks = []
+                    cropMapFields = []
+                    cropMapRaster = nil
+                    cropClassSummary = []
                     downloadCropMapForVisibleRegion()
                 } label: {
                     HStack(spacing: 3) {
@@ -1088,7 +1126,7 @@ struct AOIView: View {
                     .padding(.vertical, 4)
                     .background(.ultraThinMaterial, in: Capsule())
                 }
-                .disabled(isDownloadingCropMap || lastCameraRegion == nil)
+                .disabled(lastCameraRegion == nil)
             }
         }
         .padding(.horizontal, 12)
@@ -1416,9 +1454,10 @@ struct AOIView: View {
         }
     }
 
-    /// Crop names available: from downloaded crop map if available, else from region database.
+    /// Crop names available: from downloaded CDL crop map if available, else from region database.
+    /// WorldCover classes (Tree Cover, Shrubland, etc.) are land cover, not crop types — skip them.
     private var availableCropNames: [String] {
-        if !cropClassSummary.isEmpty {
+        if !cropClassSummary.isEmpty && cropMapRaster?.source == .cdl {
             return cropClassSummary.map { $0.name }.sorted()
         }
         return selectedCropMap.availableCrops
@@ -1481,7 +1520,7 @@ struct AOIView: View {
                     statusMessage = "Finding \(sample.crop) near \(sample.region)... (\(attempt)/3)"
                 }
 
-                let aoiRadius = fieldW * 2.0
+                let aoiRadius = fieldW * 8.0  // large search area so fields spread across map
                 let metersPerDegLat = 111_320.0
                 let metersPerDegLon = max(1, 111_320.0 * cos(sample.lat * .pi / 180))
                 let dLat = aoiRadius / metersPerDegLat
@@ -1569,10 +1608,17 @@ struct AOIView: View {
                             statusMessage = nil
                             successMessage = "\(bestField.cropName) — \(formatArea(bestField.areaSqM)) (\(sample.region))"
 
-                            cameraPosition = .region(MKCoordinateRegion(
-                                center: CLLocationCoordinate2D(latitude: bestField.centroid.lat, longitude: bestField.centroid.lon),
-                                span: MKCoordinateSpan(latitudeDelta: 0.008, longitudeDelta: 0.008)
-                            ))
+                            // Zoom to show the crop map extent, not just the selected field
+                            let rBbox = raster.bbox
+                            let rCenter = CLLocationCoordinate2D(
+                                latitude: (rBbox.minLat + rBbox.maxLat) / 2,
+                                longitude: (rBbox.minLon + rBbox.maxLon) / 2
+                            )
+                            let rSpan = MKCoordinateSpan(
+                                latitudeDelta: (rBbox.maxLat - rBbox.minLat) * 1.1,
+                                longitudeDelta: (rBbox.maxLon - rBbox.minLon) * 1.1
+                            )
+                            cameraPosition = .region(MKCoordinateRegion(center: rCenter, span: rSpan))
                             settings.aoiGeneration += 1
                         } else {
                             log.warn("AOI: No crop fields found after \(attempt) attempts, using database")
@@ -1657,18 +1703,22 @@ struct AOIView: View {
         guard cropMapRaster == nil else { return }
         autoCropMapTask?.cancel()
         autoCropMapTask = Task {
-            try? await Task.sleep(for: .seconds(2))
+            try? await Task.sleep(for: .seconds(1))
             guard !Task.isCancelled else { return }
             guard !isDownloadingCropMap else { return }
             guard cropMapRaster == nil else { return }
             // Only auto-download in view mode (don't interrupt drawing)
             guard drawMode == .view else { return }
-            downloadCropMapForVisibleRegion()
+            // Use the actual visible region (same as "Search area") —
+            // this gives the correct extent after MapKit adjusts for aspect ratio
+            downloadCropMapForVisibleRegion(setAOI: false)
         }
     }
 
-    /// Download crop map for the visible map region, setting it as the AOI bbox.
-    private func downloadCropMapForVisibleRegion() {
+    /// Download crop map for the visible map region.
+    /// When `setAOI` is true (default, used by "Search area" button), also sets the AOI to the visible window.
+    /// When false (auto-download), preserves the existing AOI.
+    private func downloadCropMapForVisibleRegion(setAOI: Bool = true) {
         guard let region = lastCameraRegion else {
             clearMessages()
             errorMessage = "No map region available"
@@ -1684,8 +1734,8 @@ struct AOIView: View {
             return
         }
         guard span.latitudeDelta > 0.0005 else { return }
-        // Use a ~10km window centred on the map (keeps raster small + fast)
-        let windowDeg = 0.1
+        // Use a ~22km window centred on the map (matches downloadCropMap maxSpan)
+        let windowDeg = 0.2
         let latHalf = min(span.latitudeDelta, windowDeg) / 2
         let lonHalf = min(span.longitudeDelta, windowDeg) / 2
         let minLat = center.latitude - latHalf
@@ -1693,15 +1743,17 @@ struct AOIView: View {
         let minLon = center.longitude - lonHalf
         let maxLon = center.longitude + lonHalf
 
-        // Set visible window as AOI rectangle
-        let vertices: [(lat: Double, lon: Double)] = [
-            (minLat, minLon), (minLat, maxLon), (maxLat, maxLon), (maxLat, minLon)
-        ]
-        let geometry = AOIGeometry.fromVertices(vertices)
-        settings.aoiSource = .mapRect(minLat: minLat, minLon: minLon, maxLat: maxLat, maxLon: maxLon)
-        settings.aoiGeometry = geometry
-        editVertices = vertices.map { CLLocationCoordinate2D(latitude: $0.lat, longitude: $0.lon) }
-        settings.aoiGeneration += 1
+        if setAOI {
+            // Set visible window as AOI rectangle
+            let vertices: [(lat: Double, lon: Double)] = [
+                (minLat, minLon), (minLat, maxLon), (maxLat, maxLon), (maxLat, minLon)
+            ]
+            let geometry = AOIGeometry.fromVertices(vertices)
+            settings.aoiSource = .mapRect(minLat: minLat, minLon: minLon, maxLat: maxLat, maxLon: maxLon)
+            settings.aoiGeometry = geometry
+            editVertices = vertices.map { CLLocationCoordinate2D(latitude: $0.lat, longitude: $0.lon) }
+            settings.aoiGeneration += 1
+        }
 
         downloadCropMap()
     }
@@ -1716,32 +1768,21 @@ struct AOIView: View {
         downloadCropMap()
     }
 
-    private func downloadCropMap() {
-        guard !isDownloadingCropMap else { return }
+    /// Cancel any in-progress crop map download and reset the downloading flag.
+    private func cancelCropMapDownload() {
+        cropMapDownloadTask?.cancel()
+        cropMapDownloadTask = nil
+        isDownloadingCropMap = false
+    }
 
-        // Determine bbox: use current AOI or visible map region
+    private func downloadCropMap() {
+        // Cancel any in-progress download so we can start fresh
+        cancelCropMapDownload()
+
+        // Always use the visible camera region — this is what the user actually sees.
+        // Fall back to AOI bbox only if no camera region available.
         var bbox: (minLon: Double, minLat: Double, maxLon: Double, maxLat: Double)
-        if let geo = settings.aoiGeometry {
-            let b = geo.bbox
-            let latPad = (b.maxLat - b.minLat) * 0.1
-            let lonPad = (b.maxLon - b.minLon) * 0.1
-            bbox = (b.minLon - lonPad, b.minLat - latPad, b.maxLon + lonPad, b.maxLat + latPad)
-            // Clamp padded bbox to keep crop map raster small (~10km window)
-            let maxSpan = 0.12
-            let latSpan = bbox.maxLat - bbox.minLat
-            let lonSpan = bbox.maxLon - bbox.minLon
-            if latSpan > maxSpan {
-                let mid = (bbox.minLat + bbox.maxLat) / 2
-                bbox.minLat = mid - maxSpan / 2
-                bbox.maxLat = mid + maxSpan / 2
-            }
-            if lonSpan > maxSpan {
-                let mid = (bbox.minLon + bbox.maxLon) / 2
-                bbox.minLon = mid - maxSpan / 2
-                bbox.maxLon = mid + maxSpan / 2
-            }
-        } else if let region = lastCameraRegion {
-            // Use visible map region as fallback
+        if let region = lastCameraRegion {
             let center = region.center
             let span = region.span
             bbox = (
@@ -1750,10 +1791,40 @@ struct AOIView: View {
                 center.longitude + span.longitudeDelta / 2,
                 center.latitude + span.latitudeDelta / 2
             )
+        } else if let geo = settings.aoiGeometry {
+            let b = geo.bbox
+            let pad = max(0.03, (b.maxLat - b.minLat) * 0.5)
+            bbox = (b.minLon - pad, b.minLat - pad, b.maxLon + pad, b.maxLat + pad)
         } else {
             clearMessages()
             errorMessage = "Pan the map to an area, then download crop map"
             return
+        }
+
+        // Ensure minimum span (~6.7km) so fields spread across a reasonable area
+        let minSpan = 0.06
+        if bbox.maxLat - bbox.minLat < minSpan {
+            let mid = (bbox.minLat + bbox.maxLat) / 2
+            bbox.minLat = mid - minSpan / 2
+            bbox.maxLat = mid + minSpan / 2
+        }
+        if bbox.maxLon - bbox.minLon < minSpan {
+            let mid = (bbox.minLon + bbox.maxLon) / 2
+            bbox.minLon = mid - minSpan / 2
+            bbox.maxLon = mid + minSpan / 2
+        }
+
+        // Cap bbox to keep raster manageable (~22km window)
+        let maxSpan = 0.2
+        if bbox.maxLat - bbox.minLat > maxSpan {
+            let mid = (bbox.minLat + bbox.maxLat) / 2
+            bbox.minLat = mid - maxSpan / 2
+            bbox.maxLat = mid + maxSpan / 2
+        }
+        if bbox.maxLon - bbox.minLon > maxSpan {
+            let mid = (bbox.minLon + bbox.maxLon) / 2
+            bbox.minLon = mid - maxSpan / 2
+            bbox.maxLon = mid + maxSpan / 2
         }
 
         // Check bbox isn't too large (WorldCover tiles are 3°x3°, CDL can handle ~1°)
@@ -1790,7 +1861,6 @@ struct AOIView: View {
         log.info("AOI: Downloading \(sourceName) for bbox \(String(format: "%.3f,%.3f,%.3f,%.3f", bbox.minLon, bbox.minLat, bbox.maxLon, bbox.maxLat))")
 
         let isUS = isUSLocation
-        cropMapDownloadTask?.cancel()
         cropMapDownloadTask = Task {
             do {
                 let raster: CropMapRaster
@@ -1799,7 +1869,10 @@ struct AOIView: View {
                 } else {
                     raster = try await cropMapService.downloadWorldCover(bbox: bbox)
                 }
-                guard !Task.isCancelled else { return }
+                guard !Task.isCancelled else {
+                    await MainActor.run { isDownloadingCropMap = false }
+                    return
+                }
 
                 await MainActor.run {
                     statusMessage = "Processing \(raster.width)x\(raster.height) raster..."
@@ -1902,10 +1975,31 @@ struct AOIView: View {
                 }
             }
 
+            // Log diagnostics for spatial distribution + area
+            if !allFields.isEmpty, let r = cropMapRaster {
+                let pxW = r.pixelWidth, pxH = r.pixelHeight
+                let midLat = (r.bbox.minLat + r.bbox.maxLat) / 2
+                let mPerDegLon = 111_320.0 * cos(midLat * .pi / 180)
+                let pxArea = (pxW * mPerDegLon) * (pxH * 111_320.0)
+                let fieldLats = allFields.map { $0.centroid.lat }
+                let fieldMinLat = fieldLats.min()!, fieldMaxLat = fieldLats.max()!
+                let cameraLat = await MainActor.run { lastCameraRegion?.center.latitude ?? 0 }
+                let cameraSpan = await MainActor.run { lastCameraRegion?.span.latitudeDelta ?? 0 }
+                await MainActor.run {
+                    log.info("AOI: raster bbox lat=\(String(format: "%.4f", r.bbox.minLat))–\(String(format: "%.4f", r.bbox.maxLat))")
+                    log.info("AOI: \(allFields.count) fields lat=\(String(format: "%.4f", fieldMinLat))–\(String(format: "%.4f", fieldMaxLat))")
+                    log.info("AOI: camera lat=\(String(format: "%.4f", cameraLat)) span=\(String(format: "%.4f", cameraSpan))")
+                    log.info("AOI: pixel=\(String(format: "%.1f", pxW * mPerDegLon))x\(String(format: "%.1f", pxH * 111_320))m, pxArea=\(String(format: "%.0f", pxArea))m\u{00B2}")
+                    if let first = allFields.first {
+                        log.info("AOI: biggest field: \(first.pixelCount)px, \(formatArea(first.areaSqM))")
+                    }
+                }
+            }
+
             // Filter to approximately field-sized: 0.5–500 hectares, not too thin
             let minFieldArea = 5_000.0    // 0.5 ha
             let maxFieldArea = 5_000_000.0 // 500 ha
-            let maxAspect = 5.0 // reject fields thinner than 5:1
+            let maxAspect = 3.5 // reject fields thinner than 3.5:1
             let fieldSized = allFields.filter { f in
                 guard f.areaSqM >= minFieldArea && f.areaSqM <= maxFieldArea else { return false }
                 // Check aspect ratio from bbox (use metres for lat/lon correction)
@@ -1928,20 +2022,83 @@ struct AOIView: View {
                 let h = latSpan * 111_320
                 let w = lonSpan * 111_320 * cosLat
                 let aspect = max(h, w) / max(min(h, w), 1)
-                return sizeScore + (aspect - 1) * 0.3 // penalise elongated fields
+                return sizeScore + (aspect - 1) * 0.8 // strongly penalise elongated fields
             }
-            let sorted: [ExtractedField]
-            if fieldSized.isEmpty {
-                sorted = shuffle ? allFields.shuffled() : allFields.sorted { $0.areaSqM > $1.areaSqM }
-            } else if shuffle {
-                sorted = fieldSized.shuffled()
+            // Spatially diversify: spread selected fields across the raster extent
+            let candidates = fieldSized.isEmpty ? allFields : fieldSized
+            let maxFields = 30
+            let finalFields: [ExtractedField]
+            if candidates.count <= maxFields {
+                finalFields = shuffle ? candidates.shuffled() : candidates.sorted { fieldScore($0) < fieldScore($1) }
             } else {
-                sorted = fieldSized.sorted { fieldScore($0) < fieldScore($1) }
-            }
+                // Divide extent into grid cells and pick best field(s) from each
+                let lats = candidates.map { $0.centroid.lat }
+                let lons = candidates.map { $0.centroid.lon }
+                let minLat = lats.min()!, maxLat = lats.max()!
+                let minLon = lons.min()!, maxLon = lons.max()!
+                let latRange = max(maxLat - minLat, 1e-6)
+                let lonRange = max(maxLon - minLon, 1e-6)
+                let gridN = 6 // 6x5 = 30 cells
+                let gridM = 5
 
-            let finalFields = Array(sorted.prefix(30))
+                // Assign each field to a grid cell
+                var buckets = [[ExtractedField]](repeating: [], count: gridN * gridM)
+                for f in candidates {
+                    let col = min(gridN - 1, Int((f.centroid.lon - minLon) / lonRange * Double(gridN)))
+                    let row = min(gridM - 1, Int((f.centroid.lat - minLat) / latRange * Double(gridM)))
+                    buckets[row * gridN + col].append(f)
+                }
+                // Sort each bucket by score
+                for i in 0..<buckets.count {
+                    if shuffle {
+                        buckets[i].shuffle()
+                    } else {
+                        buckets[i].sort { fieldScore($0) < fieldScore($1) }
+                    }
+                }
+
+                // Round-robin pick from non-empty buckets
+                var picked = [ExtractedField]()
+                var bucketIdx = [Int](repeating: 0, count: buckets.count)
+                var filled = false
+                while picked.count < maxFields && !filled {
+                    filled = true
+                    for b in 0..<buckets.count {
+                        guard picked.count < maxFields else { break }
+                        if bucketIdx[b] < buckets[b].count {
+                            picked.append(buckets[b][bucketIdx[b]])
+                            bucketIdx[b] += 1
+                            filled = false
+                        }
+                    }
+                }
+                // Shuffle so any prefix doesn't bias toward one region
+                finalFields = picked.shuffled()
+            }
             let totalFound = allFields.count
             let fieldSizedCount = fieldSized.count
+            // Log filter breakdown
+            if fieldSizedCount == 0 && totalFound > 0 {
+                var tooSmall = 0, tooLarge = 0, tooThin = 0
+                for f in allFields {
+                    if f.areaSqM < minFieldArea { tooSmall += 1 }
+                    else if f.areaSqM > maxFieldArea { tooLarge += 1 }
+                    else {
+                        let latSpan = abs(f.bbox.maxLat - f.bbox.minLat)
+                        let lonSpan = abs(f.bbox.maxLon - f.bbox.minLon)
+                        if latSpan > 0 && lonSpan > 0 {
+                            let cosLat = cos(f.centroid.lat * .pi / 180)
+                            let h = latSpan * 111_320
+                            let w = lonSpan * 111_320 * cosLat
+                            let aspect = max(h, w) / max(min(h, w), 1)
+                            if aspect > maxAspect { tooThin += 1 }
+                        }
+                    }
+                }
+                await MainActor.run {
+                    log.warn("AOI: filter rejected all — \(tooSmall) too small (<0.5ha), \(tooLarge) too large (>500ha), \(tooThin) too thin (>\(maxAspect):1)")
+                }
+            }
 
             await MainActor.run {
                 cropMapBlocks = blocks
@@ -2036,17 +2193,43 @@ struct AOIView: View {
         isPresented = false
     }
 
-    /// On first launch with no AOI, centre map on the default SF_field area.
-    private func setInitialRegionFromLocationOrLocale() {
-        // Default: SF_field.geojson area (South Africa, near Johannesburg)
-        let defaultCenter = CLLocationCoordinate2D(latitude: -26.964, longitude: 28.744)
-        let spanDeg = 0.1  // ~10km — compatible with crop map window
+    /// Confirm the current AOI and dismiss the tool to start processing.
+    private func confirmCurrentAOI() {
+        guard settings.aoiGeometry != nil else { return }
+        autoCropMapTask?.cancel()
+        cropMapBlocks = []
+        cropMapFields = []
+        clearMessages()
+        settings.aoiGeneration += 1
+        isPresented = false
+    }
 
-        cameraPosition = .region(MKCoordinateRegion(
-            center: defaultCenter,
-            span: MKCoordinateSpan(latitudeDelta: spanDeg, longitudeDelta: spanDeg)
-        ))
-        log.info("AOI: Initial view — SF_field default area")
+    /// On first launch with no AOI, load the bundled SF_field.geojson as the default AOI.
+    private func setInitialRegionFromLocationOrLocale() {
+        if let url = Bundle.main.url(forResource: "SF_field", withExtension: "geojson"),
+           let geometry = try? loadGeoJSON(from: url) {
+            settings.aoiSource = .bundled
+            settings.aoiGeometry = geometry
+            settings.recordAOI()
+            loadEditVertices(from: geometry)
+            let c = geometry.centroid
+            let b = geometry.bbox
+            let latSpan = (b.maxLat - b.minLat) * 2.0
+            let lonSpan = (b.maxLon - b.minLon) * 2.0
+            cameraPosition = .region(MKCoordinateRegion(
+                center: CLLocationCoordinate2D(latitude: c.lat, longitude: c.lon),
+                span: MKCoordinateSpan(latitudeDelta: max(0.005, latSpan), longitudeDelta: max(0.005, lonSpan))
+            ))
+            log.info("AOI: Loaded bundled SF_field.geojson (\(geometry.polygon.count) vertices)")
+        } else {
+            // Fallback if bundle file missing
+            let defaultCenter = CLLocationCoordinate2D(latitude: -26.964, longitude: 28.744)
+            cameraPosition = .region(MKCoordinateRegion(
+                center: defaultCenter,
+                span: MKCoordinateSpan(latitudeDelta: 0.1, longitudeDelta: 0.1)
+            ))
+            log.warn("AOI: SF_field.geojson not found in bundle")
+        }
     }
 
     /// Estimate crop calendar (sow/harvest months) from crop name and latitude.

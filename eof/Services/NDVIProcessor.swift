@@ -133,6 +133,7 @@ class NDVIProcessor {
                 log.error("All \(settings.enabledSources.count) source(s) failed probe")
                 throw STACError.noItems
             }
+            guard !Task.isCancelled, myGeneration == fetchGeneration else { return }
 
             let enabledSources = validatedSources
 
@@ -797,6 +798,16 @@ class NDVIProcessor {
             }
 
         } catch {
+            // Only report error if this fetch is still the current one
+            guard myGeneration == fetchGeneration else {
+                log.warn("Fetch gen \(myGeneration) error ignored (superseded by gen \(fetchGeneration))")
+                return
+            }
+            // Ignore cancellation errors (user stopped or new fetch superseded)
+            if Task.isCancelled {
+                log.info("Fetch cancelled")
+                return
+            }
             errorMessage = error.localizedDescription
             status = .error
             progressMessage = "Error: \(error.localizedDescription)"
